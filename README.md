@@ -1,12 +1,13 @@
 # ArticlesAgent
 
-A retrieval-augmented generation (RAG) system for a personal **Zotero library** of scientific papers.
+A retrieval-augmented generation (RAG) system for your own library of scientific papers, managed in
+**Zotero, JabRef, Citavi, Mendeley, EndNote** or any tool that exports BibTeX or RIS.
 Ask a research question in English or German and get back:
 
 - a short **summary** with inline author–year–page citations,
 - a list of **findings**, each backed by a **verbatim quote** from a paper (checked against the PDF text),
 - the exact **PDF page** and **section** of every quote,
-- an APA-style **reference list** generated from the Zotero BibTeX export.
+- an APA-style **reference list** generated from your reference manager's export.
 
 Built with LangChain, LangGraph, Chroma and Azure OpenAI.
 
@@ -37,12 +38,12 @@ The system has an **offline part** (run once, then again whenever the library ch
 ```mermaid
 flowchart TD
     subgraph OFFLINE["Offline: build the knowledge base"]
-        Z[("Zotero storage<br/>~/Zotero/storage/*/*.pdf")]
-        B[("My_Library.bib<br/>BibLaTeX export")]
-        Z --> P["parse.py<br/>PDF → Markdown per page<br/>(pymupdf4llm)"]
-        B --> M["metadata.py<br/>citation key, authors, year,<br/>venue, DOI, PDF paths"]
+        B[("Reference export<br/>.bib / .ris<br/>(Zotero, JabRef, Citavi, …)")]
+        Z[("PDF folder")]
+        B --> M["metadata.py + sources.py<br/>references, PDF links,<br/>DOI/title matching"]
+        Z --> M
+        M --> P["parse.py<br/>PDF → Markdown per page<br/>(pymupdf4llm)"]
         P --> C["chunking.py<br/>section-aware chunks<br/>with page ranges"]
-        M --> C
         C --> J[("data/chunks.jsonl<br/>data/papers.json")]
         J --> I["index.py<br/>embed chunks<br/>(text-embedding-3-small)"]
         I --> V[("data/chroma<br/>vector index")]
@@ -65,7 +66,7 @@ flowchart TD
 
 | Stage | Module | Input | Output | Uses LLM? |
 |---|---|---|---|---|
-| Ingestion | `ingest.py` | PDFs + `.bib` | `chunks.jsonl`, `papers.json` | no |
+| Ingestion | `ingest.py` | library sources (export + PDFs) | `chunks.jsonl`, `papers.json` | no |
 | Indexing | `index.py` | chunks | Chroma vector index | embeddings only |
 | Retrieval | `retriever.py` | query | ranked chunks | embeddings only |
 | Answering | `graph.py` | question | `Result` with cited findings | yes |
@@ -77,8 +78,8 @@ flowchart TD
 ### Requirements
 
 - Python 3.11–3.13 (the project venv uses 3.12) and [uv](https://docs.astral.sh/uv/)
-- A Zotero library with PDFs, plus a **BibLaTeX export** of it (`My_Library.bib`, exported with the
-  *Export Files* option off; the `file` field with the PDF paths must be present)
+- A reference library with PDFs, exported as **BibTeX/BibLaTeX** or **RIS** (see
+  [Supported reference managers](#supported-reference-managers))
 - An Azure OpenAI resource with three deployments (a single chat deployment can serve both roles):
 
 | Role | Env variable | Current deployment |
@@ -93,10 +94,21 @@ flowchart TD
 cd ~/Documents/AgenticAI/ArticlesAgent
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -e .
-cp .env.example .env      # then fill in endpoint, key and deployment names
+.venv/bin/streamlit run app.py --server.address localhost   # → http://localhost:8501
 ```
 
-`.env`:
+On first start, the app opens a **setup page** with three steps:
+
+1. **Azure OpenAI connection:** endpoint, key and deployment names, saved to `.env` and tested with
+   one small call per deployment.
+2. **Reference library:** choose the reference manager, give the export file (path, or upload) and
+   the PDF folder. **Check** previews how many references and PDFs were found. You can add
+   several libraries; papers that appear in more than one are kept only once.
+3. **Build database:** parsing and embedding run in the background with a progress bar (roughly
+   1–2 minutes per 10 PDFs, depending on the embedding rate limit). When it is done, the app switches
+   to the chat.
+
+Instead of the form, `.env` can also be written by hand (`cp .env.example .env`):
 
 ```ini
 AZURE_OPENAI_ENDPOINT=https://<resource>.cognitiveservices.azure.com/
@@ -109,11 +121,34 @@ AZURE_OPENAI_FAST_DEPLOYMENT=gpt-4.1-mini
 The code talks to Azure through the **v1 API** (`<endpoint>/openai/v1/`), so no `api-version` is
 needed. `.env` is git-ignored; never commit it.
 
-### Build the knowledge base
+### Supported reference managers
+
+| Manager | What to export | PDF folder | How PDFs are found |
+|---|---|---|---|
+| **Zotero** | *File → Export Library…* → **BibLaTeX** (or Better BibLaTeX), *Export Files* off | `~/Zotero/storage` | `file` field (absolute paths) |
+| **JabRef** | the library `.bib` itself | optional | `file` field, relative to the library's *General file directory* |
+| **Citavi** | *File → Export → Export references…* → **BibTeX** or RIS | project's **Citavi Attachments** | no links exported → matched by DOI / title |
+| **Mendeley** | Desktop: *File → Export…* → BibTeX; Reference Manager: *Export* → BibTeX | folder with your PDFs | `file` field if present, else DOI / title |
+| **EndNote** | *File → Export…*, style **RefMan (RIS) Export** | `<Library>.Data/PDF` | `L1` / `internal-pdf://` links, else DOI / title |
+| **Other** | any `.bib` or `.ris` | folder with the PDFs | links, else DOI / title |
+
+PDF links are resolved in this order: as written (absolute), relative to the JabRef file directory, the
+PDF folder or the export's folder, and finally **by file name** inside the PDF folder. The last step
+covers Windows paths in an export used on Linux, libraries that were moved, and EndNote's
+`internal-pdf://`.
+
+PDFs in the PDF folder that no reference links to are **matched** to references without a PDF:
+first by a DOI printed on the first two pages, then by title (in the file name, then in the
+first-page text, ≥ 92 % similarity). PDFs that match no reference become **papers of their own**,
+cited from Crossref (DOI lookup) or the PDF's own metadata. Copies of a paper that already has a PDF
+are skipped. All this PDF probing is cached in `library/cache/`.
+
+### Command line instead of the app
 
 ```bash
-.venv/bin/python -m articles_agent.ingest   # ~15 min for 270 PDFs (parsing is cached)
-.venv/bin/python -m articles_agent.index    # ~10–80 min, depends on the embedding TPM limit
+.venv/bin/python -m articles_agent.libraries check citavi ~/export.bib --pdfs "~/Citavi/Projekt/Citavi Attachments"
+.venv/bin/python -m articles_agent.libraries add   zotero ~/Zotero/export.bib --pdfs ~/Zotero/storage   # adds + builds
+.venv/bin/python -m articles_agent.libraries list | sync | remove <id>
 ```
 
 ---
@@ -122,20 +157,26 @@ needed. `.env` is git-ignored; never commit it.
 
 `python -m articles_agent.ingest` turns the library into citable text chunks.
 
-### 3.1 Metadata (`metadata.py`)
+### 3.1 Metadata (`metadata.py`, `sources.py`)
 
-The BibLaTeX export is the single source of truth for citations. For every entry it extracts the
-citation key (used as `paper_id` everywhere), title, authors, year (from `date` or `year`), venue
-(`journaltitle` / `booktitle` / …), volume, number, pages, publisher, DOI and URL.
+The library consists of **sources** (stored in `library/sources.json`): each is one export file plus an
+optional PDF folder, as configured in the app. The export is the source of truth for citations.
 
-The link between an entry and its PDF comes from Zotero's `file` field, which holds absolute paths:
+- **BibTeX/BibLaTeX** (`read_bibtex`): citation key (used as `paper_id` everywhere), title, authors, year
+  (`date` or `year`), venue (`journaltitle` / `journal` / `booktitle` / …), volume, number, pages,
+  publisher, DOI, URL, and the `file` field in Zotero, JabRef or Mendeley syntax:
 
-```
-file = {Full Text PDF:/home/diego/Zotero/storage/AG6BZMSZ/Kallioras et al. - 2020 - ….pdf:application/pdf}
-```
+  ```
+  file = {Full Text PDF:/home/u/Zotero/storage/AG6BZMSZ/Kallioras et al. - 2020 - ….pdf:application/pdf}
+  file = {:papers/Kallioras2020.pdf:PDF}                      (JabRef, relative)
+  file = {:C$\backslash$:/Users/u/Mendeley/Kallioras2020.pdf:pdf}   (Mendeley, Windows)
+  ```
+- **RIS** (`read_ris`): `TY`, `TI`/`T1`, `AU`/`A1`, `PY`/`Y1`/`DA`, `T2`/`JF`/`JO`, `VL`, `IS`, `SP`/`EP`, `DO`,
+  `UR`, `PB`, and PDF links from `L1`/`L4` (`file://` or EndNote `internal-pdf://`). RIS has no
+  citation keys, so keys are generated (`lastname_firstword_year`).
 
-PDFs in the storage folder that no bib entry links to are still included, with the file name as
-title and `zotero_<storage-key>` as `paper_id` (they get no proper reference entry).
+How the PDFs are resolved and matched is described in [Supported reference managers](#supported-reference-managers).
+The papers of all sources are merged, and duplicates across sources (same DOI or title) are kept once.
 
 ### 3.2 Parsing (`parse.py`)
 
@@ -343,7 +384,11 @@ flowchart LR
 - **Sidebar filters:** publication-year range (papers without a year are excluded while it is set)
   and a restriction to selected papers.
 - **Export:** each answer, or the whole session, as Markdown.
-- **Add papers:** upload PDFs or import a folder, and re-sync the Zotero library (see §11).
+- **📚 Libraries:** list, add, remove and re-sync reference-manager libraries.
+- **➕ Add single papers:** upload PDFs or import a folder (see §11).
+- **⚙️ Azure connection:** change endpoint, key or deployments, and test them.
+- Database updates run in a **separate background process**: you can keep chatting, and a progress
+  bar in the sidebar shows the stage. The index reloads automatically when the update is done.
 - Each question is answered independently; follow-up questions don't see earlier answers.
 
 `--server.address localhost` keeps the app private to this machine. Without it, Streamlit listens
@@ -426,12 +471,11 @@ The full graph adds query rewriting, which, for example, makes German questions 
 
 ## 10. Configuration reference
 
-All settings live in `config.yaml`; secrets and deployment names live in `.env`.
+All settings live in `config.yaml`; secrets and deployment names live in `.env` (editable in the app
+under *⚙️ Azure connection*). The libraries are configured in the app and stored in `library/sources.json`.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `library.bib_file` | `My_Library.bib` | BibLaTeX export (relative to the project) |
-| `library.storage_dir` | `/home/diego/Zotero/storage` | Zotero attachment folder |
 | `data_dir` | `data` | generated files |
 | `ingest.workers` | 4 | parallel PDF parser processes |
 | `chunking.chunk_size` | 2500 | target chunk size (characters) |
@@ -462,12 +506,16 @@ ArticlesAgent/
 ├── pyproject.toml          dependencies
 ├── config.yaml             settings (see §10)
 ├── .env / .env.example     Azure endpoint, key, deployment names
-├── My_Library.bib          Zotero BibLaTeX export
 ├── eval/
 │   └── questions.yaml      retrieval benchmark
 ├── src/articles_agent/
 │   ├── config.py           loads config.yaml, resolves paths
-│   ├── metadata.py         .bib → Paper records, PDF linking
+│   ├── metadata.py         BibTeX / RIS readers → Paper records
+│   ├── sources.py          library sources: PDF link resolution, DOI/title matching, merging
+│   ├── pdfmeta.py          DOIs / title / text from PDFs, Crossref lookup (cached)
+│   ├── jobs.py             background job runner for the app
+│   ├── ui_library.py       app widgets: setup, libraries, Azure settings, progress
+│   ├── libraries.py        CLI: list / check / add / remove / sync library sources
 │   ├── parse.py            PDF → per-page Markdown
 │   ├── chunking.py         section-aware chunking, text cleanup
 │   ├── ingest.py           CLI: parse + chunk the whole library
@@ -485,9 +533,11 @@ ArticlesAgent/
 │   ├── library.py          import non-Zotero PDFs: metadata, duplicates, registry
 │   └── add.py              CLI: add PDF files / folders
 ├── app.py                  Streamlit chat UI
-├── library/                imported papers, git-ignored
-│   ├── extra_papers.json   metadata registry for non-Zotero PDFs
-│   └── uploads/            PDFs uploaded through the UI
+├── library/                per-installation library data, git-ignored
+│   ├── sources.json        configured libraries (manager, export file, PDF folder)
+│   ├── extra_papers.json   individually added PDFs
+│   ├── uploads/            PDFs / exports uploaded through the UI
+│   └── cache/              PDF probes and Crossref answers
 └── data/                   generated, git-ignored
     ├── parsed/             per-PDF page cache (<storage-key>.json)
     ├── chunks.jsonl        all chunks
@@ -498,18 +548,18 @@ ArticlesAgent/
 
 ### Updating the library
 
-**Papers added in Zotero:**
+**Papers added in the reference manager:** export the library again (to the same file), then click
+**🔄 Re-sync all libraries** (sidebar → *📚 Libraries*), or run `python -m articles_agent.libraries sync`.
+Only new or changed PDFs are parsed, and only new chunks are embedded. New PDFs in the PDF folder are
+picked up even before the next export; they are matched or cited from Crossref until the export
+contains them.
 
-1. Export the library again as BibLaTeX to `My_Library.bib`.
-2. Click **🔄 Re-sync Zotero library** in the UI (sidebar → *Add papers*), or run
-   `python -m articles_agent.ingest && python -m articles_agent.index`.
+**Another library** (e.g. a Citavi project next to Zotero): sidebar → *📚 Libraries* → *Add a library*.
+**Removing** a library there also removes its papers from the database.
 
-Only new or changed PDFs are parsed, and only new chunks are embedded. Zotero PDFs that aren't in the `.bib` yet
-are indexed with their file name as the title, until the next export gives them proper metadata.
+**PDFs that belong to no library** (single files or whole folders):
 
-**PDFs from outside Zotero** (single files or whole folders):
-
-- UI: sidebar → **➕ Add papers** → upload PDF files and/or enter a folder path (searched
+- UI: sidebar → **➕ Add single papers** → upload PDF files and/or enter a folder path (searched
   recursively) → **Add to library**.
 - CLI: `python -m articles_agent.add paper.pdf ~/Papers/new_batch [--no-crossref]`
 
@@ -557,5 +607,6 @@ without jumping to the page, instead of *Open in Zotero*.
 - [x] Hybrid index and retrieval, retrieval benchmark
 - [x] LangGraph answer pipeline with verified, page-accurate citations
 - [x] Streamlit chat UI: chat history, expandable sources, year/paper filters, Markdown export
+- [x] Setup page for new users; Zotero, JabRef, Citavi, Mendeley, EndNote and generic BibTeX/RIS libraries
 - [ ] Batch topic reports: `topics.yaml` → one cited Markdown/DOCX report per topic
 - [ ] Extend `eval/questions.yaml` to 10–20 questions; optionally add a cross-encoder reranker

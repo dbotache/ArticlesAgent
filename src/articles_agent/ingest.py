@@ -1,6 +1,7 @@
 """Parse every PDF of the library into cited, page-aware chunks.
 
-The library is the Zotero .bib export plus papers imported via `articles_agent.add` / the UI.
+The library is defined by the sources in library/sources.json (reference-manager exports +
+PDF folders) plus papers imported via `articles_agent.add` / the UI.
 
     python -m articles_agent.ingest            # incremental (re-uses parsed cache)
     python -m articles_agent.ingest --limit 5  # quick trial run
@@ -18,8 +19,8 @@ from tqdm import tqdm
 
 from .chunking import chunk_pages
 from .config import load_config
-from .metadata import build_library
 from .parse import parse_pdf
+from .sources import build_library
 from .store import parsed_cache_file
 
 
@@ -39,7 +40,7 @@ def run_ingest(reparse: bool = False, limit: int | None = None, progress=None) -
     data_dir: Path = cfg["data_dir"]
     (data_dir / "parsed").mkdir(parents=True, exist_ok=True)
 
-    papers = build_library(cfg["library"]["bib_file"], cfg["library"]["storage_dir"])
+    papers = build_library(progress=progress)
     jobs = [(pid, pdf) for pid, p in papers.items() for pdf in p.pdf_paths if Path(pdf).exists()]
     if limit:
         jobs = jobs[:limit]

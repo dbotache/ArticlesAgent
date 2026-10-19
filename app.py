@@ -1,6 +1,9 @@
 """Chat UI for the library.
 
-    .venv/bin/streamlit run app.py
+    .venv/bin/streamlit run app.py --server.address localhost
+
+Without a database yet, the app shows a setup page: Azure connection → reference library
+(Zotero, JabRef, Citavi, Mendeley, EndNote, any BibTeX/RIS) → build the database.
 """
 
 import subprocess
@@ -9,9 +12,13 @@ from pathlib import Path
 import streamlit as st
 
 from articles_agent.graph import ask_stream, get_retriever
-from articles_agent.library import collect_pdfs, register_pdfs, save_upload, update_database
+from articles_agent.llm import missing_settings
 from articles_agent.results import Result
+from articles_agent.sources import load_sources
 from articles_agent.store import ZOTERO_KEY
+from articles_agent.ui_library import (index_size, render_add_papers, render_add_source,
+                                       render_connection, render_job, render_sources,
+                                       start_update)
 
 st.set_page_config(page_title="ArticlesAgent", page_icon="📚", layout="wide")
 
@@ -19,6 +26,12 @@ st.set_page_config(page_title="ArticlesAgent", page_icon="📚", layout="wide")
 @st.cache_resource(show_spinner="Loading the library index…")
 def retriever():
     return get_retriever()
+
+
+def reload_index():
+    """After a database update: rebuild BM25 and reload chunks on the next access."""
+    retriever.clear()
+    get_retriever.cache_clear()
 
 
 def md_safe(text: str) -> str:
@@ -31,47 +44,42 @@ def zotero_url(pdf_path: str, page: int) -> str:
     return f"zotero://open-pdf/library/items/{Path(pdf_path).parent.name}?page={page}"
 
 
-def run_update(uploads, folder: str, use_crossref: bool):
-    """Register uploaded files / a folder's PDFs, then parse, chunk and embed what is new."""
-    log = []
-    with st.status("Updating the library…", expanded=True) as status:
-        try:
-            paths = [save_upload(f.name, f.getvalue()) for f in uploads]
-            if folder.strip():
-                found = collect_pdfs(folder.strip())
-                status.write(f"{len(found)} PDFs found in {folder.strip()}")
-                paths += found
-            bar = st.progress(0.0)
-            labels = {"register": "Reading metadata", "parse": "Parsing PDFs",
-                      "embed": "Embedding passages"}
+# ------------------------------------------------------------------ setup (no database yet)
 
-            def progress(stage, done, total):
-                bar.progress(done / max(total, 1), text=f"{labels[stage]}: {done}/{total}")
 
-            added = []
-            if paths:
-                results = register_pdfs(paths, use_crossref=use_crossref, progress=progress)
-                icons = {"added": "✅", "skipped": "⏭️", "error": "❌"}
-                log += [f"{icons[x['status']]} **{x['file']}**: {x['detail']}" for x in results]
-                added = [x for x in results if x["status"] == "added"]
-            if added or not paths:  # no paths = Zotero re-sync
-                status.write("Parsing new PDFs and embedding new passages…")
-                report = update_database(progress=progress)
-                per_paper = report["ingest"]["chunks_per_paper"]
-                log += [f"⚠️ **{x['file']}**: no text extracted (scanned PDF?)"
-                        for x in added if not per_paper.get(x["paper_id"])]
-                log.append(f"Indexed {report['index']['embedded']:,} new passages; "
-                           f"the index now holds {report['index']['total']:,}.")
-            status.update(label="Library updated", state="complete")
-        except Exception as exc:
-            status.update(label="Update failed", state="error")
-            log.append(f"❌ {type(exc).__name__}: {exc}")
-    retriever.clear()
-    get_retriever.cache_clear()
-    st.session_state.update_log = log
-    st.session_state.upload_key += 1  # empties the file uploader
-    st.rerun()
+def setup_page():
+    st.title("📚 Set up ArticlesAgent")
+    st.markdown("ArticlesAgent answers questions from **your own library of papers**, with "
+                "verbatim quotes, page numbers and a reference list. Setting it up takes three steps; "
+                "building the database then runs in the background (roughly 1–2 minutes per 10 PDFs, "
+                "depending on your Azure rate limit).")
+    running = render_job(reload_index)
+    missing = missing_settings()
+    sources = load_sources()
 
+    with st.expander(("✅ " if not missing else "") + "**1 · Azure OpenAI connection**", expanded=bool(missing)):
+        render_connection()
+    with st.expander(("✅ " if sources else "") + "**2 · Reference library**",
+                     expanded=not missing and not sources):
+        if missing:
+            st.caption("Set up the Azure connection first.")
+        elif sources:
+            render_sources()
+            st.markdown("**Add another library**")
+            render_add_source("setup_more")
+        else:
+            render_add_source("setup", first=True)
+    if sources and not missing and not running:
+        st.markdown("**3 · Build the database**")
+        if st.button("🚀 Build database", type="primary"):
+            start_update("Building the database")
+
+
+if index_size() == 0:
+    setup_page()
+    st.stop()
+
+# ------------------------------------------------------------------ chat app
 
 r = retriever()
 papers = r.papers
@@ -79,17 +87,19 @@ chunk_by_id = {c["chunk_id"]: c for c in r.chunks}
 st.session_state.setdefault("history", [])
 history: list[dict] = st.session_state.history
 
-# ------------------------------------------------------------------ sidebar
-
 with st.sidebar:
     st.title("📚 ArticlesAgent")
     indexed = sorted({c["paper_id"] for c in r.chunks}, key=lambda pid: papers[pid]["short_cite"])
     st.caption(f"{len(indexed)} papers · {len(r.chunks):,} searchable passages")
+    render_job(reload_index)
 
     st.subheader("Filters")
     years = sorted({int(p["year"]) for p in papers.values() if str(p.get("year", "")).isdigit()})
-    year_range = st.slider("Publication year", years[0], years[-1], (years[0], years[-1]))
-    year_filtered = year_range != (years[0], years[-1])
+    if len(years) > 1:
+        year_range = st.slider("Publication year", years[0], years[-1], (years[0], years[-1]))
+        year_filtered = year_range != (years[0], years[-1])
+    else:
+        year_range, year_filtered = (None, None), False
     if year_filtered:
         st.caption("Papers without a year are excluded while this filter is set.")
     selected = st.multiselect(
@@ -97,31 +107,14 @@ with st.sidebar:
         format_func=lambda pid: f"{papers[pid]['short_cite']} — {papers[pid]['title'][:70]}")
 
     st.divider()
-    st.session_state.setdefault("upload_key", 0)
-    with st.expander("➕ Add papers", expanded=bool(st.session_state.get("update_log"))):
-        uploads = st.file_uploader("PDF files", type="pdf", accept_multiple_files=True,
-                                   key=f"upload_{st.session_state.upload_key}")
-        folder = st.text_input("…and/or a folder (searched recursively)",
-                               placeholder="/home/diego/Papers/new")
-        crossref = st.checkbox("Look up citation data via DOI (Crossref)", value=True,
-                               help="Only the DOI printed in the PDF is sent to api.crossref.org.")
-        add_clicked = st.button("Add to library", type="primary", use_container_width=True,
-                                disabled=not (uploads or folder.strip()))
-        sync_clicked = st.button(
-            "🔄 Re-sync Zotero library", use_container_width=True,
-            help="Re-read My_Library.bib and index PDFs added in Zotero since the last run. "
-                 "Export the .bib from Zotero first.")
-        st.caption("Parsing takes a few seconds per PDF, embedding about 1 minute per "
-                   "10 papers. Keep this tab open until it is done.")
-        if add_clicked:
-            run_update(uploads, folder, crossref)
-        elif sync_clicked:
-            run_update([], "", crossref)
-        if log := st.session_state.get("update_log"):
-            st.markdown("\n\n".join(log))
-            if st.button("Dismiss", key="dismiss_log"):
-                del st.session_state.update_log
-                st.rerun()
+    with st.expander("📚 Libraries"):
+        render_sources()
+        st.markdown("**Add a library**")
+        render_add_source("sidebar")
+    with st.expander("➕ Add single papers"):
+        render_add_papers()
+    with st.expander("⚙️ Azure connection"):
+        render_connection()
 
     st.divider()
     if history:

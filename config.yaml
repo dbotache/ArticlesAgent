@@ -1,6 +1,5 @@
-library:
-  bib_file: "My_Library.bib"
-  storage_dir: /home/diego/Zotero/storage
+# Library sources (reference-manager exports + PDF folders) are configured in the app
+# and stored in library/sources.json.
 
 # Generated artefacts (parsed page cache, chunks, metadata, later the vector index)
 data_dir: data
