@@ -9,6 +9,7 @@ from pathlib import Path
 import chromadb
 
 from .chunking import clean_page_text
+from .config import shared_dir
 
 COLLECTION = "chunks"
 
@@ -41,7 +42,7 @@ def load_chunks(cfg: dict) -> list[dict]:
 ZOTERO_KEY = re.compile(r"^[A-Z0-9]{8}$")
 
 
-def parsed_cache_file(data_dir: Path, pdf: str) -> Path:
+def parsed_cache_file(pdf: str) -> Path:
     p = Path(pdf)
     # a Zotero storage key (parent folder) is unique per attachment; other PDFs may share
     # a folder, so they are keyed by a hash of their path
@@ -49,13 +50,13 @@ def parsed_cache_file(data_dir: Path, pdf: str) -> Path:
         name = p.parent.name
     else:
         name = "x_" + hashlib.sha1(str(p).encode()).hexdigest()[:16]
-    return data_dir / "parsed" / f"{name}.json"
+    return shared_dir() / "parsed" / f"{name}.json"  # shared by all projects
 
 
 @cache
-def parsed_pages(data_dir: Path, pdf: str) -> dict[int, str]:
+def parsed_pages(pdf: str) -> dict[int, str]:
     """Cleaned full text of every page of one PDF, from the ingestion cache."""
-    pages = json.loads(parsed_cache_file(data_dir, pdf).read_text(encoding="utf-8"))["pages"]
+    pages = json.loads(parsed_cache_file(pdf).read_text(encoding="utf-8"))["pages"]
     return {p["page"]: clean_page_text(p["text"]) for p in pages}
 
 

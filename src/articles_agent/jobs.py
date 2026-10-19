@@ -9,6 +9,8 @@ import traceback
 from dataclasses import dataclass, field
 from typing import Callable
 
+from .config import NoProjectError, current_project, use_project
+
 STAGES = {"scan": "Matching PDFs to references", "register": "Reading PDF metadata",
           "parse": "Parsing PDFs", "embed": "Embedding passages"}
 
@@ -16,6 +18,7 @@ STAGES = {"scan": "Matching PDFs to references", "register": "Reading PDF metada
 @dataclass
 class Job:
     label: str
+    project: str = ""  # the job works on this project, whatever the UI shows meanwhile
     status: str = "running"  # running | done | error
     stage: str = ""
     done: int = 0
@@ -50,11 +53,19 @@ def start(label: str, fn: Callable[[Job], None]) -> bool:
     with _lock:
         if _current and _current.status == "running":
             return False
-        job = _current = Job(label)
+        try:
+            project = current_project()
+        except NoProjectError:
+            project = ""
+        job = _current = Job(label, project=project)
 
     def run():
         try:
-            fn(job)
+            if job.project:
+                with use_project(job.project):
+                    fn(job)
+            else:
+                fn(job)
             job.status = "done"
         except Exception as exc:
             job.error = f"{type(exc).__name__}: {exc}"

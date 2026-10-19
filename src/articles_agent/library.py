@@ -1,6 +1,6 @@
 """Add individual PDFs that belong to no library source, as single files or whole folders.
 
-Imported papers are recorded in library/extra_papers.json, which `sources.build_library`
+Imported papers are recorded in the project's library/extra_papers.json, which `sources.build_library`
 merges with the library sources, so re-ingestion keeps them. Uploaded files are copied to
 library/uploads/; PDFs from a folder are used in place.
 """
@@ -17,21 +17,31 @@ from pathlib import Path
 
 from rapidfuzz import fuzz, process
 
-from .config import PROJECT_ROOT
+from .config import APP_HOME, current_project, project_dir
 from .metadata import Paper, make_id, norm_doi, norm_title
 from .pdfmeta import metadata_from_pdf, save_caches
 from .sources import build_library
 
-LIBRARY_DIR = PROJECT_ROOT / "library"
-REGISTRY = LIBRARY_DIR / "extra_papers.json"
-UPLOADS = LIBRARY_DIR / "uploads"
+
+
+def library_dir() -> Path:
+    return project_dir() / "library"
+
+
+def registry_file() -> Path:
+    return library_dir() / "extra_papers.json"
+
+
+def uploads_dir() -> Path:
+    return library_dir() / "uploads"
+
 PAPER_FIELDS = {f.name for f in fields(Paper)}
 
 
 # ------------------------------------------------------------ registry
 
 def load_registry() -> dict[str, dict]:
-    return json.loads(REGISTRY.read_text(encoding="utf-8")) if REGISTRY.exists() else {}
+    return json.loads(registry_file().read_text(encoding="utf-8")) if registry_file().exists() else {}
 
 
 def registry_papers() -> dict[str, Paper]:
@@ -40,10 +50,10 @@ def registry_papers() -> dict[str, Paper]:
 
 
 def _save_registry(reg: dict) -> None:
-    LIBRARY_DIR.mkdir(exist_ok=True)
-    tmp = REGISTRY.with_suffix(".tmp")
+    library_dir().mkdir(parents=True, exist_ok=True)
+    tmp = registry_file().with_suffix(".tmp")
     tmp.write_text(json.dumps(reg, ensure_ascii=False, indent=1), encoding="utf-8")
-    tmp.replace(REGISTRY)
+    tmp.replace(registry_file())
 
 
 # ------------------------------------------------------------ files
@@ -58,7 +68,7 @@ def collect_pdfs(folder: str | Path) -> list[Path]:
 
 def save_upload(name: str, data: bytes) -> Path:
     """Store an uploaded PDF under library/uploads/<content hash>/<name>."""
-    target = UPLOADS / hashlib.sha256(data).hexdigest()[:12] / Path(name).name
+    target = uploads_dir() / hashlib.sha256(data).hexdigest()[:12] / Path(name).name
     if not target.exists():
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
@@ -144,11 +154,11 @@ def update_database_isolated(progress=None) -> dict:
     script (Streamlit's __main__) instead of starting cleanly."""
     src_dir = str(Path(__file__).resolve().parents[1])
     env = os.environ | {"PYTHONPATH": os.pathsep.join(filter(None, [src_dir, os.environ.get("PYTHONPATH")])),
-                        "ARTICLES_AGENT_HOME": str(PROJECT_ROOT)}
+                        "ARTICLES_AGENT_HOME": str(APP_HOME), "ARTICLES_AGENT_PROJECT": current_project()}
     report = None
     with tempfile.TemporaryFile("w+", encoding="utf-8") as err:
         proc = subprocess.Popen([sys.executable, "-m", "articles_agent.libraries", "sync", "--progress-json"],
-                                cwd=PROJECT_ROOT, env=env, stdout=subprocess.PIPE, stderr=err, text=True)
+                                cwd=APP_HOME, env=env, stdout=subprocess.PIPE, stderr=err, text=True)
         for line in proc.stdout:
             if not line.startswith("@@"):
                 continue  # library chatter (e.g. pymupdf notices)

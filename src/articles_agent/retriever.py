@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import numpy as np
 from rank_bm25 import BM25Okapi
 
-from .config import load_config
+from .config import current_project, load_config
 from .llm import embedding_deployment, get_embeddings
 from .store import embed_text, get_collection, load_chunks, load_papers
 
@@ -25,6 +25,7 @@ class Hit:
     score: float
     dense_rank: int | None = None
     bm25_rank: int | None = None
+    project: str = ""
 
     @property
     def citation(self) -> str:
@@ -36,6 +37,7 @@ class Hit:
 
 class HybridRetriever:
     def __init__(self, cfg: dict | None = None):
+        self.project = current_project()
         self.cfg = cfg or load_config()
         self.papers = load_papers(self.cfg)
         self.chunks = load_chunks(self.cfg)
@@ -87,7 +89,8 @@ class HybridRetriever:
             for rank, cid in enumerate(ranks, start=1):
                 if cid not in fused:
                     c = self.chunks[self.by_id[cid]]
-                    fused[cid] = Hit(chunk=c, paper=self.papers[c["paper_id"]], score=0.0)
+                    fused[cid] = Hit(chunk=c, paper=self.papers[c["paper_id"]], score=0.0,
+                                     project=self.project)
                 fused[cid].score += 1 / (RRF_K + rank)
                 setattr(fused[cid], attr, rank)
         return sorted(fused.values(), key=lambda h: -h.score)[:k]

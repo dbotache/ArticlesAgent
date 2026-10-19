@@ -5,6 +5,7 @@ rewrite → retrieve → grade ─┬→ generate → cite → END
    └── too few sources ─────┘ (at most `max_attempts` rounds)
 """
 
+import hashlib
 import re
 from functools import cache
 from typing import TypedDict
@@ -17,6 +18,8 @@ from .citations import cite_labels, format_reference, locate_page, match_quote
 from .llm import get_chat
 from .results import CitedFinding, Result
 from .retriever import RRF_K, Hit, HybridRetriever
+from .config import current_project, settings, use_project
+from .metadata import norm_doi, norm_title
 from .store import parsed_pages
 
 # ------------------------------------------------------------ LLM output schemas
@@ -79,6 +82,7 @@ the sentence it supports, as [S1] or [S1, S3] — not all at the end.
 
 class State(TypedDict, total=False):
     question: str
+    projects: list[str]  # slugs to search; several = cross-project search
     paper_ids: list[str] | None
     year_from: int | None
     year_to: int | None
@@ -90,13 +94,34 @@ class State(TypedDict, total=False):
     result: Result
 
 
-@cache
-def get_retriever() -> HybridRetriever:
-    return HybridRetriever()
+_retrievers: dict[str, HybridRetriever] = {}
+
+
+def get_retriever(project: str | None = None) -> HybridRetriever:
+    """The (cached) retriever of a project, default: the active one."""
+    slug = project or current_project()
+    if slug not in _retrievers:
+        with use_project(slug):
+            _retrievers[slug] = HybridRetriever()
+    return _retrievers[slug]
+
+
+get_retriever.cache_clear = _retrievers.clear  # after a database update
 
 
 def _cfg() -> dict:
-    return get_retriever().cfg["answer"]
+    return settings()["answer"]
+
+
+def _namespaced(h: Hit, slug: str, canonical: dict[str, str]) -> Hit:
+    """Cross-project search: ids become '<project>::<id>'; the same paper found in two
+    projects (same DOI/title) keeps one id, so it is cited and listed once."""
+    p = h.paper
+    ident = norm_doi(p["doi"]) if p.get("doi") else norm_title(p["title"])
+    pid = canonical.setdefault(ident, f"{slug}::{p['paper_id']}")
+    return Hit(chunk={**h.chunk, "chunk_id": f"{slug}::{h.chunk['chunk_id']}", "paper_id": pid},
+               paper={**p, "paper_id": pid}, score=h.score, dense_rank=h.dense_rank,
+               bm25_rank=h.bm25_rank, project=slug)
 
 
 def _format_sources(hits: list[Hit], max_chars: int | None = None) -> str:
@@ -119,17 +144,25 @@ def rewrite(state: State) -> State:
 
 
 def retrieve(state: State) -> State:
-    """Search with every query and fuse the ranked lists (reciprocal rank fusion)."""
-    cfg, fused, scores = _cfg(), {}, {}
-    for q in state["queries"]:
-        hits = get_retriever().search(q, k=cfg["per_query_k"], paper_ids=state.get("paper_ids"),
-                                   year_from=state.get("year_from"), year_to=state.get("year_to"))
-        for rank, h in enumerate(hits, 1):
-            cid = h.chunk["chunk_id"]
-            fused.setdefault(cid, h)
-            scores[cid] = scores.get(cid, 0) + 1 / (RRF_K + rank)
-    top = sorted(fused, key=lambda cid: -scores[cid])[:cfg["grade_candidates"]]
-    return {"candidates": [fused[cid] for cid in top]}
+    """Search every project with every query and fuse the ranked lists (reciprocal rank fusion).
+    Identical passages (a paper that is part of several projects) count once."""
+    cfg, fused, scores, canonical = _cfg(), {}, {}, {}
+    projects = state.get("projects") or [current_project()]
+    multi = len(projects) > 1
+    for slug in projects:
+        retriever = get_retriever(slug)
+        for q in state["queries"]:
+            hits = retriever.search(q, k=cfg["per_query_k"],
+                                    paper_ids=None if multi else state.get("paper_ids"),
+                                    year_from=state.get("year_from"), year_to=state.get("year_to"))
+            for rank, h in enumerate(hits, 1):
+                if multi:
+                    h = _namespaced(h, slug, canonical)
+                key = hashlib.sha1(h.chunk["text"].encode()).hexdigest()
+                fused.setdefault(key, h)
+                scores[key] = scores.get(key, 0) + 1 / (RRF_K + rank)
+    top = sorted(fused, key=lambda k: -scores[k])[:cfg["grade_candidates"]]
+    return {"candidates": [fused[k] for k in top]}
 
 
 def grade(state: State) -> State:
@@ -168,7 +201,6 @@ def generate(state: State) -> State:
 def cite(state: State) -> State:
     """Verify every quote against the source chunk, find its page, build references."""
     sources, answer = state["sources"], state["answer"]
-    data_dir = get_retriever().cfg["data_dir"]
     threshold = _cfg()["fuzzy_threshold"]
 
     def source(sid: str) -> Hit | None:
@@ -184,7 +216,7 @@ def cite(state: State) -> State:
             continue
         quote, exact = match
         c = hit.chunk
-        page = locate_page(quote, parsed_pages(data_dir, c["pdf_path"]), c["page_start"], c["page_end"])
+        page = locate_page(quote, parsed_pages(c["pdf_path"]), c["page_start"], c["page_end"])
         verified.append((f, hit, quote, exact, page))
 
     cited_ids = set(re.findall(r"S(\d+)", answer.summary))
@@ -214,7 +246,8 @@ def cite(state: State) -> State:
     summary = re.sub(rf"\s*{marker}(?:\s*[,;]?\s*{marker})*", summary_marker, answer.summary)
     findings = [CitedFinding(claim=f.claim, quote=quote, exact=exact, paper_id=h.paper["paper_id"],
                              page=page, section=h.chunk["section"], chunk_id=h.chunk["chunk_id"],
-                             citation=f"({labels[h.paper['paper_id']]}, p. {page})")
+                             citation=f"({labels[h.paper['paper_id']]}, p. {page})", project=h.project,
+                             pdf_path=h.chunk["pdf_path"], passage=h.chunk["text"])
                 for f, h, quote, exact, page in verified]
     refs = sorted(format_reference(p, labels[pid].rsplit(", ", 1)[-1])
                   for pid, p in cited_papers.items())
@@ -237,17 +270,20 @@ def get_graph():
     return g.compile()
 
 
-def ask(question: str, paper_ids: list[str] | None = None,
-        year_from: int | None = None, year_to: int | None = None) -> Result:
-    state = get_graph().invoke({"question": question, "paper_ids": paper_ids,
-                                "year_from": year_from, "year_to": year_to})
-    return state["result"]
+def _inputs(question, paper_ids, year_from, year_to, projects) -> dict:
+    return {"question": question, "projects": projects or [current_project()], "paper_ids": paper_ids,
+            "year_from": year_from, "year_to": year_to}
 
 
+def ask(question: str, paper_ids: list[str] | None = None, year_from: int | None = None,
+        year_to: int | None = None, projects: list[str] | None = None) -> Result:
+    """Answer from the active project, or from `projects` (several = cross-project search)."""
+    return get_graph().invoke(_inputs(question, paper_ids, year_from, year_to, projects))["result"]
 
-def ask_stream(question: str, paper_ids: list[str] | None = None,
-               year_from: int | None = None, year_to: int | None = None):
+
+def ask_stream(question: str, paper_ids: list[str] | None = None, year_from: int | None = None,
+               year_to: int | None = None, projects: list[str] | None = None):
     """Yield (node_name, state_update) while the graph runs; the 'cite' update holds the Result."""
-    inputs = {"question": question, "paper_ids": paper_ids, "year_from": year_from, "year_to": year_to}
+    inputs = _inputs(question, paper_ids, year_from, year_to, projects)
     for update in get_graph().stream(inputs, stream_mode="updates"):
         yield from update.items()

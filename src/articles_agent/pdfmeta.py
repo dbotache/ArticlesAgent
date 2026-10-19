@@ -1,7 +1,7 @@
 """Facts read from a PDF itself: DOIs, first-page text, embedded properties, title guess.
 
 Used to match PDFs to references (when an export has no file links) and to cite PDFs that have
-no reference entry at all. Results are cached in library/cache/ (keyed by path + mtime), and
+no reference entry at all. Results are cached in shared/pdfmeta/ (keyed by path + mtime), and
 Crossref answers by DOI, so a re-sync doesn't open every PDF or query Crossref again.
 """
 
@@ -16,10 +16,9 @@ from pathlib import Path
 import pymupdf
 from rapidfuzz import fuzz
 
-from .config import PROJECT_ROOT
+from .config import shared_dir
 from .metadata import clean_doi, norm_doi
 
-CACHE_DIR = PROJECT_ROOT / "library" / "cache"
 DOI_RE = re.compile(r"\b(10\.\d{4,9}/[^\s\"<>{}]+)", re.IGNORECASE)
 ARXIV_RE = re.compile(r"arxiv:\s*(\d{4}\.\d{4,5})(?:v\d+)?", re.IGNORECASE)
 CROSSREF_TYPES = {"journal-article": "article", "proceedings-article": "inproceedings",
@@ -28,23 +27,27 @@ CROSSREF_TYPES = {"journal-article": "article", "proceedings-article": "inprocee
                   "posted-content": "misc"}
 
 _lock = threading.Lock()
+
+
+def cache_dir() -> Path:
+    return shared_dir() / "pdfmeta"  # shared by all projects
 _caches: dict[str, dict] = {}
 
 
 def _cache(name: str) -> dict:
     if name not in _caches:
-        f = CACHE_DIR / f"{name}.json"
+        f = cache_dir() / f"{name}.json"
         _caches[name] = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
     return _caches[name]
 
 
 def save_caches() -> None:
     with _lock:
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        cache_dir().mkdir(parents=True, exist_ok=True)
         for name, data in _caches.items():
-            tmp = CACHE_DIR / f"{name}.tmp"
+            tmp = cache_dir() / f"{name}.tmp"
             tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-            tmp.replace(CACHE_DIR / f"{name}.json")
+            tmp.replace(cache_dir() / f"{name}.json")
 
 
 # ------------------------------------------------------------ probing

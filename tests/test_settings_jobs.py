@@ -15,8 +15,8 @@ def test_missing_settings(workspace, monkeypatch):
     assert llm.missing_settings() == ["AZURE_OPENAI_API_KEY"]
 
 
-def test_save_settings_keeps_other_lines_and_is_private(workspace, monkeypatch):
-    env = workspace / ".env"
+def test_save_settings_keeps_other_lines_and_is_private(app_home, monkeypatch):
+    env = app_home / ".env"  # shared by all projects
     env.write_text("# comment\nOTHER=1\nAZURE_OPENAI_ENDPOINT=https://old/\n")
     cleared = []
     for name in ("get_embeddings", "get_chat"):  # the fakes have no lru cache; record the clear

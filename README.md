@@ -369,6 +369,59 @@ flowchart LR
 
 ## 8. Usage
 
+### Projects
+
+Work is organised in **projects**: independent workspaces, each with its own reference libraries,
+its own database (index) and its own chat history. Typical use: one project per research project or
+thesis chapter, each made from the libraries — or only the tagged part of a library — that belong to it.
+
+| | Per project | Shared by all projects |
+|---|---|---|
+| What | libraries (`sources.json`), tag filters, single imported PDFs, index, chat | Azure settings (`.env`), PDF text cache, PDF metadata (Crossref/arXiv), **embedding cache** |
+| Where | `projects/<slug>/` | `.env`, `shared/` |
+
+Because the caches are shared, a paper that belongs to several projects is parsed and embedded only
+once. Building a second project from the same Zotero library costs **no Azure calls** for the passages
+already known (only new passages are embedded).
+
+**A part of a big library:** two ways, which can be combined:
+
+1. *Export only the part*, e.g. in Zotero: right-click a collection → **Export Collection…**; in
+   Citavi: export the project; in JabRef: a separate `.bib` or a group.
+2. *Tag filter* per library: when adding a library (or later under 📚 Libraries → *Apply filter*), choose
+   keywords/tags; only references carrying one of them become part of the project. Read from Zotero
+   tags (`keywords`), Citavi keywords, JabRef `groups`, Mendeley tags and RIS `KW`; case-insensitive.
+   Tip: Zotero imports many automatic tags (arXiv categories, IEEE keywords); for projects, own tags such as
+   `#motor-design` are clearer. PDFs of excluded references are recognised as such, and PDFs without any
+   reference are left out while a filter is set.
+
+**Search all projects:** the sidebar toggle *🔎 Search all projects* answers from every project with a
+database at once. A paper that is in several projects is cited once, and each finding shows which
+project it came from. The per-paper filter is per project and is therefore disabled in this mode.
+
+**Managing projects:** switch with the *Project* box at the top of the sidebar; ➕ *New project*
+creates one; 🗂 *Project settings* renames, describes or deletes one. Deleting removes the project's
+library settings, index and uploads, but never your PDFs or exports, and the shared caches stay.
+
+**Command line:** every tool accepts `--project <slug>` (or the environment variable
+`ARTICLES_AGENT_PROJECT`); without it, the first project is used.
+
+```bash
+.venv/bin/python -m articles_agent.projects create "Motor design" --description "PhD chapter 3"
+.venv/bin/python -m articles_agent.libraries keywords ~/Zotero/all.bib            # tags with counts
+.venv/bin/python -m articles_agent.libraries --project motor-design add zotero ~/Zotero/all.bib \
+    --pdfs ~/Zotero/storage --keywords "#motor-design" PMSM
+.venv/bin/python -m articles_agent.libraries --project motor-design filter zotero "#motor-design"
+.venv/bin/python -m articles_agent.ask --project motor-design "Which surrogate models are used?"
+.venv/bin/python -m articles_agent.ask --all-projects "Which surrogate models are used?"
+.venv/bin/python -m articles_agent.projects list | rename <slug> <name> | delete <slug>
+```
+
+**Migration:** an installation from before projects (with `library/` and `data/` directly in the
+project folder) is moved automatically into a first project, *My library*, on the next start. The
+caches move to `shared/`, and the existing index seeds the embedding cache, so nothing is parsed or
+embedded again.
+
 ### Chat UI (Streamlit)
 
 ```bash
@@ -490,6 +543,7 @@ the network blocked. Your real library, index and `.env` are never touched.
 | `test_sources.py` | every reference manager's PDF linking/matching, preview, adding/removing libraries, de-duplication across libraries |
 | `test_library.py` | single-PDF import with duplicate detection, upload path safety, the database update in a separate process |
 | `test_pipeline.py` | ingestion → index → hybrid search with filters → LangGraph answer: invented quote dropped, pages and references correct, retry loop, incremental re-runs |
+| `test_projects.py` | projects: create/rename/delete, active project, migration of the old layout (incl. embedding-cache seeding), independence, shared parse/embedding caches (second project without Azure calls), tag filters for every format, cross-project search |
 | `test_settings_jobs.py` | saving `.env` (file mode 600), connection check, background job runner |
 | `test_app.py` | the Streamlit UI headless (AppTest): setup page for a new user → build → chat, answers, filters, errors, adding/removing papers and libraries |
 | `test_deployment.py` | **web hosting**: server health endpoint, data home separate from code (`ARTICLES_AGENT_HOME`), configuration via environment variables only, API key never sent to the browser, dependencies declared, no personal paths, `.gitignore` |
@@ -509,7 +563,7 @@ remove that test's marker, and from then on the check is enforced.
 
 ### Deployment notes
 
-- `ARTICLES_AGENT_HOME=/srv/articles-agent` keeps `.env`, `library/` and `data/` outside the code
+- `ARTICLES_AGENT_HOME=/srv/articles-agent` keeps `.env`, `projects/` and `shared/` outside the code
   folder (e.g. on a persistent volume). Without its own `config.yaml`, the shipped one is used.
 - Azure settings can come from environment variables alone; a `.env` file is optional.
 - Health check for a proxy or orchestrator: `GET /_stcore/health` → `ok`.
@@ -579,20 +633,29 @@ ArticlesAgent/
 │   ├── results.py          Result / CitedFinding + Markdown rendering
 │   ├── ask.py              CLI: ask a question
 │   ├── library.py          import non-Zotero PDFs: metadata, duplicates, registry
-│   └── add.py              CLI: add PDF files / folders
+│   ├── add.py              CLI: add PDF files / folders
+│   ├── projects.py         projects: create / list / rename / delete, migration (+ CLI)
+│   └── embcache.py         shared embedding cache (SQLite)
 ├── app.py                  Streamlit chat UI
-├── library/                per-installation library data, git-ignored
-│   ├── sources.json        configured libraries (manager, export file, PDF folder)
-│   ├── extra_papers.json   individually added PDFs
-│   ├── uploads/            PDFs / exports uploaded through the UI
-│   └── cache/              PDF probes and Crossref answers
-└── data/                   generated, git-ignored
-    ├── parsed/             per-PDF page cache (<storage-key>.json)
-    ├── chunks.jsonl        all chunks
-    ├── papers.json         bibliographic metadata per paper_id
-    ├── ingest_report.json  parse errors, PDFs with blank pages
-    └── chroma/             vector index
+├── projects/               one folder per project, git-ignored
+│   └── <slug>/
+│       ├── project.json    name, description, created
+│       ├── library/
+│       │   ├── sources.json        libraries (manager, export file, PDF folder, tag filter)
+│       │   ├── extra_papers.json   individually added PDFs
+│       │   └── uploads/            PDFs / exports uploaded through the UI
+│       └── data/
+│           ├── chunks.jsonl        all chunks
+│           ├── papers.json         bibliographic metadata per paper_id
+│           ├── ingest_report.json  parse errors, PDFs with blank pages
+│           └── chroma/             vector index
+└── shared/                 caches for all projects, git-ignored
+    ├── parsed/             per-PDF page text (<storage-key>.json)
+    ├── pdfmeta/            PDF probes, Crossref and arXiv answers
+    └── embeddings.sqlite   one vector per (embedding model, passage text)
 ```
+
+(`.env`, `projects/` and `shared/` live in `ARTICLES_AGENT_HOME`, which defaults to the project folder.)
 
 ### Updating the library
 
@@ -656,5 +719,6 @@ without jumping to the page, instead of *Open in Zotero*.
 - [x] LangGraph answer pipeline with verified, page-accurate citations
 - [x] Streamlit chat UI: chat history, expandable sources, year/paper filters, Markdown export
 - [x] Setup page for new users; Zotero, JabRef, Citavi, Mendeley, EndNote and generic BibTeX/RIS libraries
+- [x] Projects with shared caches, tag filters per library, optional search across all projects
 - [ ] Batch topic reports: `topics.yaml` → one cited Markdown/DOCX report per topic
 - [ ] Extend `eval/questions.yaml` to 10–20 questions; optionally add a cross-encoder reranker

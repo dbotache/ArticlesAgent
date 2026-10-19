@@ -1,5 +1,6 @@
 """The Streamlit app, driven headlessly with AppTest (fake models, temporary installation)."""
 
+import shutil
 import time
 from pathlib import Path
 
@@ -63,12 +64,12 @@ def test_setup_page_asks_for_azure_first(workspace, monkeypatch):
     for key in FAKE_ENV:
         monkeypatch.delenv(key)
     at = run_app()
-    assert at.title[0].value == "📚 Set up ArticlesAgent"
+    assert at.title[0].value == "📚 Set up “Test project”"
     assert "Set up the Azure connection first." in texts(at)
     assert by_label(at.text_input, "API key").value == ""
 
 
-def test_setup_saves_and_tests_azure_settings(workspace, monkeypatch):
+def test_setup_saves_and_tests_azure_settings(app_home, monkeypatch):
     for key in FAKE_ENV:
         monkeypatch.delenv(key)
     at = run_app()
@@ -78,7 +79,7 @@ def test_setup_saves_and_tests_azure_settings(workspace, monkeypatch):
     by_label(at.text_input, "Chat deployment").set_value("fake-chat")
     at.button[0].click().run()  # "Save and test connection"
     assert not at.exception
-    assert "AZURE_OPENAI_API_KEY=new-secret-key" in (workspace / ".env").read_text()
+    assert "AZURE_OPENAI_API_KEY=new-secret-key" in (app_home / ".env").read_text()
     assert len(at.success) == 3  # embeddings, chat, fast model
     at.run()  # the form clears on submit; AppTest shows that one run later than a browser
     assert "new-secret-key" not in " ".join(texts(at))
@@ -179,4 +180,73 @@ def test_remove_last_library_returns_to_setup(built):
     at = run_app()
     at.sidebar.button(key="rm_zotero").click().run()
     at = wait_for_job(at)
-    assert at.title[0].value == "📚 Set up ArticlesAgent"
+    assert at.title[0].value == "📚 Set up “Test project”"
+
+
+# ------------------------------------------------------------------ projects
+
+
+def test_welcome_page_creates_first_project(app_home):
+    shutil.rmtree(app_home / "projects")
+    at = run_app()
+    assert at.title[0].value == "📚 Welcome to ArticlesAgent"
+    at.text_input(key="first_name").set_value("Motor design")
+    at.text_area(key="first_desc").set_value("PhD chapter 3")
+    by_label(at.button, "Create project").click().run()
+    assert not at.exception
+    assert at.title[0].value == "📚 Set up “Motor design”"
+    assert (app_home / "projects" / "motor-design" / "project.json").exists()
+
+
+def test_new_project_from_sidebar_and_switching(built):
+    at = run_app()
+    assert at.sidebar.selectbox[0].value == "test"
+    at.sidebar.text_input(key="sidebar_name").set_value("Battery study")
+    by_label(at.sidebar.button, "Create project").click().run()
+    assert at.title[0].value == "📚 Set up “Battery study”"  # new project is active, still empty
+    assert at.sidebar.selectbox[0].value == "battery-study"
+    at.sidebar.selectbox[0].select("test").run()
+    assert any(c.value.startswith("3 papers") for c in at.sidebar.caption)  # back on the built project
+
+
+def test_tag_filter_in_setup(workspace, tmp_path, sample_pdfs):
+    bib = tmp_path / "tagged.bib"
+    bib.write_text(bib_entry("doe_topology_2021", keywords="cnn, motor-design")
+                   + bib_entry("muster_fehlererkennung_2019", keywords="diagnosis"))
+    at = run_app()
+    at.text_input(key="setup_ref").set_value(str(bib)).run()
+    picker = at.multiselect(key="setup_kw")
+    assert picker.options == ["cnn (1)", "diagnosis (1)", "motor-design (1)"]
+    picker.select("cnn").run()
+    at.text_input(key="setup_pdf_zotero").set_value(str(sample_pdfs["doe_topology_2021"].parent)).run()
+    at.button(key="setup_check").click().run()
+    assert any("**1** of them carry one of the tags cnn" in m.value for m in at.markdown)
+    at.button(key="setup_go").click().run()
+    at = wait_for_job(at)
+    assert any(c.value.startswith("1 papers") for c in at.sidebar.caption)
+
+
+def test_search_all_projects_toggle(built, sample_pdfs, tmp_path):
+    from articles_agent.config import use_project
+    from articles_agent.index import run_index
+    from articles_agent.ingest import run_ingest
+    from articles_agent.projects import create_project
+    from articles_agent.sources import add_source
+    other = create_project("Other")
+    bib = tmp_path / "o.bib"
+    bib.write_text(bib_entry("muster_fehlererkennung_2019",
+                             f"PDF:{sample_pdfs['muster_fehlererkennung_2019']}:application/pdf"))
+    with use_project(other.slug):
+        add_source("citavi", str(bib))
+        run_ingest(progress=lambda *a: None)
+        run_index(progress=lambda *a: None)
+    at = run_app()
+    toggle = at.sidebar.toggle(key="all_projects")
+    assert not toggle.disabled
+    toggle.set_value(True).run()
+    assert at.sidebar.multiselect[0].disabled  # paper filter is per project
+    assert any("about all projects" in m.value for m in at.markdown)
+    at = ask(at, "Klassifikator Lagerschäden")
+    assert len(at.chat_message) == 2
+    at.sidebar.toggle(key="all_projects").set_value(False).run()
+    assert len(at.chat_message) == 0  # separate chat history per project / all-projects

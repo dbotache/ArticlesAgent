@@ -9,9 +9,11 @@ from . import jobs
 from .config import load_config
 from .library import collect_pdfs, register_pdfs, save_upload, update_database_isolated
 from .llm import SETTINGS, check_connection, embedding_deployment, missing_settings, save_settings
-from .sources import (MANAGERS, Source, add_source, load_sources, read_source, remove_source,
-                      save_uploaded_export, validate)
+from .sources import (MANAGERS, Source, add_source, keyword_counts, load_sources, read_source,
+                      remove_source, save_uploaded_export, set_keywords, validate)
 from .store import get_collection
+from .graph import get_retriever
+from .projects import Project, create_project, delete_project, update_project
 
 ZOTERO_STORAGE = Path.home() / "Zotero" / "storage"
 
@@ -49,7 +51,8 @@ def index_size() -> int:
 def _summary(report: dict) -> list[str]:
     ing, idx = report["ingest"], report["index"]
     lines = [f"{ing['pdfs']:,} PDFs in the library, {ing['parsed']:,} parsed now.",
-             f"{idx['embedded']:,} new passages embedded; the index holds {idx['total']:,}."]
+             f"{idx['added']:,} passages added ({idx['reused']:,} from the shared cache, "
+             f"{idx['embedded']:,} embedded now); the index holds {idx['total']:,}."]
     if ing["parse_errors"]:
         lines.append(f"⚠️ {len(ing['parse_errors'])} PDFs could not be read (see data/ingest_report.json).")
     return lines
@@ -134,8 +137,12 @@ def render_connection():
 
 def _preview(src: Source):
     rep = read_source(src, scan_folder=False)
+    kept = rep.references - rep.filtered_out
     st.markdown(f"- **{rep.references:,}** references in the export\n"
-                f"- **{rep.linked:,}** of them with a PDF found through the export's file links\n"
+                + (f"- **{kept:,}** of them carry one of the tags {', '.join(src.keywords)}"
+                   " — only these go into the project\n" if src.keywords else "")
+                + f"- **{rep.linked:,}** of {'these' if src.keywords else 'them'} with a PDF found "
+                  "through the export's file links\n"
                 + (f"- **{rep.pdfs_in_folder:,}** PDFs in the folder, **{rep.unlinked_pdfs:,}** not linked "
                    "— they will be matched to references by DOI/title, or added as papers of their own\n"
                    if src.pdf_dir else "")
@@ -143,6 +150,23 @@ def _preview(src: Source):
                    "— give the PDF folder so they can be found by file name\n" if rep.broken_links else ""))
     if not rep.references:
         st.warning("No references found. Is this a BibTeX or RIS export?")
+
+
+def _keyword_picker(reference_file: str, key: str, default: list[str] | None = None) -> list[str]:
+    """Multiselect of the export's tags/keywords (with counts); empty = whole library."""
+    try:
+        counts = keyword_counts(reference_file)
+    except Exception:
+        return []
+    if not counts:
+        st.caption("This export has no keywords/tags, so the whole library is used.")
+        return []
+    options = list(dict.fromkeys(list(default or []) + list(counts)))
+    return st.multiselect(
+        "Only references with one of these keywords/tags (optional)", options, default=default or [],
+        key=key, format_func=lambda kw: f"{kw} ({counts.get(kw, 0)})",
+        placeholder="All references", help="Zotero tags, Citavi keywords, JabRef groups, Mendeley tags, "
+                                           "RIS KW. Use this for a project-specific part of a big library.")
 
 
 def render_add_source(key: str, first: bool = False):
@@ -161,6 +185,7 @@ def render_add_source(key: str, first: bool = False):
     if upload is not None:
         ref_path = str(save_uploaded_export(upload.name, upload.getvalue()))
     problems = validate(ref_path, pdf_dir) if ref_path.strip() else ["Give the export file."]
+    keywords = [] if problems else _keyword_picker(ref_path.strip(), key=f"{key}_kw")
     left, right = st.columns(2)
     check = left.button("Check", key=f"{key}_check", disabled=bool(problems), use_container_width=True)
     go = right.button("Build database" if first else "Add library", type="primary", key=f"{key}_go",
@@ -169,10 +194,10 @@ def render_add_source(key: str, first: bool = False):
         st.error(" ".join(problems))
     if check:
         _preview(Source(id="preview", manager=manager, reference_file=ref_path.strip(),
-                        pdf_dir=pdf_dir.strip(), use_crossref=crossref))
+                        pdf_dir=pdf_dir.strip(), use_crossref=crossref, keywords=keywords))
     if go:
         try:
-            src = add_source(manager, ref_path.strip(), pdf_dir.strip(), crossref)
+            src = add_source(manager, ref_path.strip(), pdf_dir.strip(), crossref, keywords)
         except ValueError as exc:
             st.error(str(exc))
             return
@@ -186,10 +211,19 @@ def render_sources():
     for src in sources:
         with st.container(border=True):
             st.markdown(f"**{src.label}**")
-            st.caption(f"Export: `{src.reference_file}`" + (f"  \nPDFs: `{src.pdf_dir}`" if src.pdf_dir else ""))
+            st.caption(f"Export: `{src.reference_file}`" + (f"  \nPDFs: `{src.pdf_dir}`" if src.pdf_dir else "")
+                       + f"  \nFilter: {src.filter_label}")
             if not Path(src.reference_file).exists():
                 st.error("Export file not found.")
-            if st.button("Remove", key=f"rm_{src.id}", help="Removes this library and its papers from the database"):
+                continue
+            new_kw = _keyword_picker(src.reference_file, key=f"kw_{src.id}", default=src.keywords)
+            left, right = st.columns(2)
+            if left.button("Apply filter", key=f"apply_{src.id}", disabled=new_kw == src.keywords,
+                           use_container_width=True):
+                set_keywords(src.id, new_kw)
+                start_update(f"Changing the filter of {src.label}")
+            if right.button("Remove", key=f"rm_{src.id}", use_container_width=True,
+                            help="Removes this library and its papers from this project's database"):
                 remove_source(src.id)
                 start_update(f"Removing {src.label}")
     if sources and st.button("🔄 Re-sync all libraries", use_container_width=True,
@@ -223,3 +257,63 @@ def render_add_papers():
             return any(x["status"] == "added" for x in results)  # False: nothing to index
 
         start_update(f"Adding {len(paths)} PDF(s)", before=register)
+
+
+# ------------------------------------------------------------ projects
+
+def render_new_project(key: str, first: bool = False) -> None:
+    with st.form(f"{key}_new_project", clear_on_submit=True):
+        name = st.text_input("Project name", placeholder="e.g. Motor design", key=f"{key}_name")
+        description = st.text_area("Description (optional)", key=f"{key}_desc", height=68,
+                                   placeholder="What is this project about?")
+        submitted = st.form_submit_button("Create project", type="primary" if first else "secondary")
+    if submitted:
+        try:
+            project = create_project(name, description)
+        except ValueError as exc:
+            st.error(str(exc))
+            return
+        st.session_state.project = project.slug
+        st.rerun()
+
+
+def render_project_switcher(projects: list[Project]) -> None:
+    """Selectbox of all projects (sidebar) plus a form for a new one."""
+    slugs = [p.slug for p in projects]
+    names = {p.slug: p.name for p in projects}
+    # no widget key: the selection follows st.session_state.project (e.g. after creating a project)
+    chosen = st.selectbox("Project", slugs, index=slugs.index(st.session_state.project),
+                          format_func=names.get)
+    if chosen != st.session_state.project:
+        st.session_state.project = chosen
+        st.rerun()
+    if desc := next(p.description for p in projects if p.slug == chosen):
+        st.caption(desc)
+    with st.expander("➕ New project"):
+        render_new_project("sidebar")
+
+
+def render_project_settings(project: Project) -> None:
+    with st.form(f"settings_{project.slug}"):
+        name = st.text_input("Name", value=project.name)
+        description = st.text_area("Description", value=project.description, height=68)
+        if st.form_submit_button("Save"):
+            try:
+                update_project(project.slug, name=name, description=description)
+            except ValueError as exc:
+                st.error(str(exc))
+            else:
+                st.rerun()
+    st.caption(f"Folder: `{project.dir}`")
+    sure = st.checkbox("Delete this project's libraries settings, index and uploads", key=f"del_ok_{project.slug}",
+                       help="Your PDFs and reference-manager exports are not touched; shared caches stay, "
+                            "so re-creating the project later is fast.")
+    if st.button("🗑 Delete project", disabled=not sure, key=f"del_{project.slug}"):
+        job = jobs.current()
+        if job and job.status == "running" and job.project == project.slug:
+            st.error("An update of this project is still running.")
+            return
+        delete_project(project.slug)
+        get_retriever.cache_clear()
+        st.session_state.pop("project", None)
+        st.rerun()

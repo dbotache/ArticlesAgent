@@ -30,6 +30,7 @@ class Paper:
     pages: str = ""
     publisher: str = ""
     pdf_paths: list[str] = field(default_factory=list)
+    keywords: list[str] = field(default_factory=list)  # tags / keywords / groups from the manager
     in_bib: bool = True  # False: no reference entry, metadata taken from the PDF itself
     source: str = ""     # id of the library source it came from
 
@@ -96,6 +97,17 @@ def _clean(value: str) -> str:
     return re.sub(r"\s+", " ", value.replace("{", "").replace("}", "")).strip()
 
 
+def split_keywords(*values: str) -> list[str]:
+    """'a, b; c' → ['a', 'b', 'c'] (order kept, duplicates removed case-insensitively)."""
+    seen, out = set(), []
+    for value in values:
+        for kw in re.split(r"[,;]", _clean(value or "")):
+            if (kw := kw.strip()) and kw.lower() not in seen:
+                seen.add(kw.lower())
+                out.append(kw)
+    return out
+
+
 # ------------------------------------------------------------ BibTeX / BibLaTeX
 
 # JabRef stores the library's PDF base folder in a comment block
@@ -145,6 +157,8 @@ def _paper_from_bib(e: dict) -> Paper:
         pages=e.get("pages", "").replace("--", "–"),
         publisher=_clean(e.get("publisher", "")),
         pdf_paths=parse_file_field(e.get("file", "")),
+        # Zotero/Citavi/Mendeley: keywords (Zotero tags); JabRef: groups; Mendeley: mendeley-tags
+        keywords=split_keywords(e.get("keywords", ""), e.get("groups", ""), e.get("mendeley-tags", "")),
     )
 
 
@@ -203,6 +217,7 @@ def _paper_from_ris(r: dict[str, list[str]]) -> Paper:
         pages=f"{sp}–{ep}" if sp and ep else sp,
         publisher=first("PB"),
         pdf_paths=links,
+        keywords=split_keywords(*r.get("KW", [])),
     )
 
 

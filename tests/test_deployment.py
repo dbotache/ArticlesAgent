@@ -75,15 +75,18 @@ def test_server_starts_and_answers_health_checks(tmp_path):
 
 
 def test_data_home_is_separate_from_code(tmp_path):
-    """On a server, .env/library/data live on a volume, the code in the image."""
+    """On a server, .env/projects/shared live on a volume, the code in the image."""
     home = tmp_path / "volume"
-    out = run_python("from articles_agent.config import PROJECT_ROOT, load_config, CODE_ROOT;"
+    out = run_python("from articles_agent.config import APP_HOME, CODE_ROOT, load_config, shared_dir;"
+                     "from articles_agent.projects import create_project;"
                      "from articles_agent import sources, library, pdfmeta;"
-                     "print(PROJECT_ROOT, load_config()['data_dir'], sources.SOURCES_FILE.parent,"
-                     " library.UPLOADS.parent, pdfmeta.CACHE_DIR.parent, CODE_ROOT)", child_env(home))
-    root, data, lib1, lib2, lib3, code = out.split()
-    assert root == str(home) and data == str(home / "data")
-    assert lib1 == lib2 == lib3 == str(home / "library")
+                     "create_project('Alpha');"
+                     "print(APP_HOME, load_config()['data_dir'], sources.sources_file().parent,"
+                     " library.uploads_dir().parent, pdfmeta.cache_dir().parent, CODE_ROOT)", child_env(home))
+    root, data, lib1, lib2, shared, code = out.split()
+    assert root == str(home) and data == str(home / "projects" / "alpha" / "data")
+    assert lib1 == lib2 == str(home / "projects" / "alpha" / "library")
+    assert shared == str(home / "shared")
     assert code == str(CODE_ROOT)  # config.yaml falls back to the shipped one
 
 

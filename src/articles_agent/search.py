@@ -6,17 +6,20 @@
 
 import argparse
 
+from .config import add_project_option, apply_project_option
 from .retriever import HybridRetriever
 
 
 def main():
     ap = argparse.ArgumentParser()
+    add_project_option(ap)
     ap.add_argument("query")
     ap.add_argument("-k", type=int, default=8)
     ap.add_argument("--from", dest="year_from", type=int)
     ap.add_argument("--to", dest="year_to", type=int)
     ap.add_argument("--paper", action="append", help="restrict to citation key (repeatable)")
     args = ap.parse_args()
+    apply_project_option(args)
 
     hits = HybridRetriever().search(args.query, k=args.k, paper_ids=args.paper,
                                     year_from=args.year_from, year_to=args.year_to)

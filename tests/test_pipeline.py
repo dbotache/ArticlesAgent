@@ -48,7 +48,7 @@ def test_ingest_is_incremental(built, monkeypatch):
 
 def test_index_is_incremental_and_removes_stale(built, fake_embeddings):
     first = run_index(progress=lambda *a: None)
-    assert first["embedded"] == 0 and fake_embeddings.calls == 0
+    assert first["added"] == 0 and fake_embeddings.calls == 0
     # drop one paper's chunks (as if its library was removed) → its vectors are deleted
     chunks_file = built / "data" / "chunks.jsonl"
     lines = [line for line in chunks_file.read_text().splitlines() if json.loads(line)["paper_id"] != DOE]
@@ -65,9 +65,10 @@ def test_index_refuses_other_embedding_model(built, monkeypatch):
         get_collection(load_config(), "another-model")
 
 
-def test_parsed_cache_names(tmp_path):
-    zotero = parsed_cache_file(tmp_path, "/z/storage/AB12CD34/paper.pdf")
-    a, b = parsed_cache_file(tmp_path, "/papers/a.pdf"), parsed_cache_file(tmp_path, "/papers/b.pdf")
+def test_parsed_cache_names(app_home):
+    zotero = parsed_cache_file("/z/storage/AB12CD34/paper.pdf")
+    a, b = parsed_cache_file("/papers/a.pdf"), parsed_cache_file("/papers/b.pdf")
+    assert zotero.parent == app_home / "shared" / "parsed"  # shared by all projects
     assert zotero.name == "AB12CD34.json"
     assert a != b and a.name.startswith("x_")  # same folder, different files
 

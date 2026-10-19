@@ -1,8 +1,8 @@
 """Library sources: reference-manager exports (+ PDF folders) that make up the database.
 
 A source is one export file (.bib or .ris) from Zotero, JabRef, Citavi, Mendeley, EndNote, …
-plus an optional folder with the PDFs. Sources are stored in library/sources.json, so every
-installation (every user) has its own.
+plus an optional folder with the PDFs. Sources are stored per project in
+projects/<slug>/library/sources.json.
 
 How PDFs are found for a source:
 1. links in the export (Zotero/JabRef/Mendeley `file` field, RIS L1/L4) — absolute, relative to
@@ -10,6 +10,8 @@ How PDFs are found for a source:
 2. PDFs in the PDF folder that no reference links to are matched by DOI, then by title
    (file name, then first-page text) to references that have no PDF yet;
 3. the remaining PDFs are added as papers of their own, cited from Crossref / PDF metadata.
+Optionally a source keeps only references carrying one of its keywords (Zotero tags, Citavi
+keywords, JabRef groups, Mendeley tags, RIS KW) – a project-specific subset of a big library.
 """
 
 import json
@@ -19,12 +21,19 @@ from pathlib import Path
 
 from rapidfuzz import fuzz, process
 
-from .config import PROJECT_ROOT
+from .config import project_dir
 from .metadata import Paper, make_id, norm_doi, norm_title, read_bibtex, read_ris
 from .pdfmeta import metadata_from_pdf, probe_pdf, save_caches
 
-SOURCES_FILE = PROJECT_ROOT / "library" / "sources.json"
-EXPORTS_DIR = PROJECT_ROOT / "library" / "exports"
+
+
+def sources_file() -> Path:
+    return project_dir() / "library" / "sources.json"
+
+
+def exports_dir() -> Path:
+    return project_dir() / "library" / "exports"
+
 
 MANAGERS = {
     "zotero": "Zotero",
@@ -44,6 +53,11 @@ class Source:
     reference_file: str
     pdf_dir: str = ""
     use_crossref: bool = True
+    keywords: list[str] = field(default_factory=list)  # only references with one of these tags
+
+    @property
+    def filter_label(self) -> str:
+        return ", ".join(self.keywords) if self.keywords else "all references"
 
     @property
     def label(self) -> str:
@@ -64,6 +78,7 @@ class SourceReport:
     pdfs_in_folder: int = 0
     unlinked_pdfs: int = 0       # PDFs in the folder no reference links to
     standalone: int = 0          # unlinked PDFs added as papers of their own
+    filtered_out: int = 0        # references without one of the source's keywords
     duplicates: int = 0          # unlinked PDFs that are copies of a linked paper
     broken_links: int = 0        # file links that point to nothing
 
@@ -71,14 +86,14 @@ class SourceReport:
 # ------------------------------------------------------------ persistence
 
 def load_sources() -> list[Source]:
-    if not SOURCES_FILE.exists():
+    if not sources_file().exists():
         return []
-    return [Source(**s) for s in json.loads(SOURCES_FILE.read_text(encoding="utf-8"))]
+    return [Source(**s) for s in json.loads(sources_file().read_text(encoding="utf-8"))]
 
 
 def save_sources(sources: list[Source]) -> None:
-    SOURCES_FILE.parent.mkdir(parents=True, exist_ok=True)
-    SOURCES_FILE.write_text(json.dumps([asdict(s) for s in sources], indent=1), encoding="utf-8")
+    sources_file().parent.mkdir(parents=True, exist_ok=True)
+    sources_file().write_text(json.dumps([asdict(s) for s in sources], indent=1), encoding="utf-8")
 
 
 def validate(reference_file: str, pdf_dir: str = "") -> list[str]:
@@ -95,7 +110,7 @@ def validate(reference_file: str, pdf_dir: str = "") -> list[str]:
 
 
 def add_source(manager: str, reference_file: str, pdf_dir: str = "",
-               use_crossref: bool = True) -> Source:
+               use_crossref: bool = True, keywords: list[str] | None = None) -> Source:
     if problems := validate(reference_file, pdf_dir):
         raise ValueError(" ".join(problems))
     sources = load_sources()
@@ -107,9 +122,18 @@ def add_source(manager: str, reference_file: str, pdf_dir: str = "",
     while any(s.id == sid for s in sources):
         n += 1
         sid = f"{manager}{n}"
-    src = Source(id=sid, manager=manager, reference_file=ref, pdf_dir=pdfs, use_crossref=use_crossref)
+    src = Source(id=sid, manager=manager, reference_file=ref, pdf_dir=pdfs, use_crossref=use_crossref,
+                 keywords=list(keywords or []))
     save_sources(sources + [src])
     return src
+
+
+def set_keywords(source_id: str, keywords: list[str]) -> None:
+    sources = load_sources()
+    for s in sources:
+        if s.id == source_id:
+            s.keywords = list(keywords)
+    save_sources(sources)
 
 
 def remove_source(source_id: str) -> None:
@@ -118,8 +142,8 @@ def remove_source(source_id: str) -> None:
 
 def save_uploaded_export(name: str, data: bytes) -> Path:
     """An export uploaded through the browser (relative PDF links then rely on the PDF folder)."""
-    EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    target = EXPORTS_DIR / Path(name).name
+    exports_dir().mkdir(parents=True, exist_ok=True)
+    target = exports_dir() / Path(name).name
     target.write_bytes(data)
     return target
 
@@ -235,9 +259,30 @@ def read_source(src: Source, scan_folder: bool = True, progress=None) -> SourceR
                 progress("scan", n, len(unlinked))
         save_caches()
 
+    # keyword filter last: PDFs of excluded references were matched above, so they are not
+    # mistaken for papers of their own; with a filter, untagged own papers are excluded too
+    if src.keywords:
+        wanted = {k.lower() for k in src.keywords}
+        kept = [e for e in entries if e.in_bib and wanted & {k.lower() for k in e.keywords}]
+        report.filtered_out = sum(e.in_bib for e in entries) - len(kept)
+        report.standalone = 0
+        entries = kept
     report.with_pdf = sum(bool(e.pdf_paths) for e in entries if e.in_bib)
     report.papers = entries
     return report
+
+
+def keyword_counts(reference_file: str) -> dict[str, int]:
+    """Tags/keywords in an export with the number of references carrying each (for the filter UI)."""
+    ref = Path(reference_file)
+    entries = read_ris(ref) if ref.suffix.lower() in RIS_SUFFIXES else read_bibtex(ref)[0]
+    counts: dict[str, int] = {}
+    spelling: dict[str, str] = {}  # the filter ignores case, so 'CNN' and 'cnn' are one tag
+    for e in entries:
+        for kw in e.keywords:
+            key = spelling.setdefault(kw.lower(), kw)
+            counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0].lower())))
 
 
 # ------------------------------------------------------------ the whole library

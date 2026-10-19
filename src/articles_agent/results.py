@@ -13,6 +13,9 @@ class CitedFinding:
     section: str
     chunk_id: str
     citation: str         # "(Kallioras et al., 2020, p. 6)"
+    project: str = ""     # slug of the project the paper belongs to
+    pdf_path: str = ""
+    passage: str = ""     # the full passage the quote was taken from
 
 
 @dataclass

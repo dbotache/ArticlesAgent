@@ -1,7 +1,8 @@
 """Shared fixtures.
 
-Every test runs against a temporary installation (`workspace`): its own config, library/,
-data/ and .env, fake Azure models and no network. Nothing touches the real library or index.
+Every test runs against a temporary installation: an app home (`app_home`: .env, shared/
+caches, projects/) with one project "test" (`workspace` = that project's folder: library/,
+data/), fake Azure models and no network. Nothing touches the real projects or index.
 
     .venv/bin/python -m pytest                    # all offline tests
     .venv/bin/python -m pytest -m "not integration"
@@ -11,6 +12,7 @@ data/ and .env, fake Azure models and no network. Nothing touches the real libra
 import json
 import shutil
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 
 import pymupdf
@@ -86,12 +88,13 @@ def bib_entry(key: str, file_field: str | None = None, **override) -> str:
     p = {**PAPERS[key], **override}
     fields = {"title": p["title"], "author": " and ".join(p["authors"]), "date": p["year"],
               "journaltitle": p["venue"], "doi": p["doi"], "volume": p["volume"],
-              "number": p["number"], "pages": p["pages"], "file": file_field}
+              "number": p["number"], "pages": p["pages"], "keywords": p.get("keywords"),
+              "file": file_field}
     body = ",\n".join(f"  {k} = {{{v}}}" for k, v in fields.items() if v)
     return f"@article{{{key},\n{body}\n}}\n\n"
 
 
-def ris_entry(key: str, link: str | None = None) -> str:
+def ris_entry(key: str, link: str | None = None, keywords: tuple[str, ...] = ()) -> str:
     p = PAPERS[key]
     lines = ["TY  - JOUR", f"TI  - {p['title']}", *[f"AU  - {a}" for a in p["authors"]],
              f"PY  - {p['year']}", f"T2  - {p['venue']}"]
@@ -99,6 +102,7 @@ def ris_entry(key: str, link: str | None = None) -> str:
         lines.append(f"DO  - https://doi.org/{p['doi']}")
     if link:
         lines.append(f"L1  - {link}")
+    lines += [f"KW  - {kw}" for kw in keywords]
     return "\n".join(lines + ["ER  - ", ""]) + "\n"
 
 
@@ -131,23 +135,21 @@ FAKE_ENV = {
 }
 
 
-def patch_home(mp: pytest.MonkeyPatch, root: Path, chat: FakeChat, embeddings: FakeEmbeddings):
-    """Point every module at `root` as installation home and swap in fake models."""
-    from articles_agent import (config, graph, index, library, llm, pdfmeta, retriever, sources,
-                                store)
+PROJECT = "test"
+
+
+def patch_home(mp: pytest.MonkeyPatch, root: Path, chat: FakeChat, embeddings: FakeEmbeddings) -> Path:
+    """Point every module at `root` as app home with an (empty) project "test", swap in fake
+    models. Returns the project folder."""
+    from articles_agent import config, graph, index, library, llm, pdfmeta, retriever, store
+    from articles_agent.projects import _write, Project
 
     root.mkdir(parents=True, exist_ok=True)
-    shutil.copy(CODE_ROOT / "config.yaml", root / "config.yaml")
-    mp.setattr(config, "PROJECT_ROOT", root)
-    mp.setattr(llm, "PROJECT_ROOT", root)
-    mp.setattr(library, "PROJECT_ROOT", root)
-    mp.setattr(library, "LIBRARY_DIR", root / "library")
-    mp.setattr(library, "REGISTRY", root / "library" / "extra_papers.json")
-    mp.setattr(library, "UPLOADS", root / "library" / "uploads")
-    mp.setattr(sources, "SOURCES_FILE", root / "library" / "sources.json")
-    mp.setattr(sources, "EXPORTS_DIR", root / "library" / "exports")
-    mp.setattr(pdfmeta, "CACHE_DIR", root / "library" / "cache")
+    mp.setattr(config, "APP_HOME", root)
+    mp.setattr(llm, "APP_HOME", root)
+    mp.setattr(library, "APP_HOME", root)
     mp.setattr(pdfmeta, "_caches", {})
+    mp.delenv("ARTICLES_AGENT_PROJECT", raising=False)
     for k, v in FAKE_ENV.items():
         mp.setenv(k, v)
     def get_embeddings():
@@ -165,6 +167,17 @@ def patch_home(mp: pytest.MonkeyPatch, root: Path, chat: FakeChat, embeddings: F
     mp.setattr(llm, "get_chat", get_chat)
     for fn in (store.parsed_pages, graph.get_retriever, graph.get_graph):
         fn.cache_clear()
+    project = Project(slug=PROJECT, name="Test project", created="2026-01-01T00:00:00")
+    if not project.dir.exists():
+        _write(project)
+    return project.dir
+
+
+@contextmanager
+def active(slug: str):
+    from articles_agent.config import use_project
+    with use_project(slug):
+        yield
 
 
 @pytest.fixture
@@ -179,13 +192,19 @@ def fake_embeddings():
 
 @pytest.fixture
 def workspace(tmp_path, monkeypatch, fake_chat, fake_embeddings) -> Path:
-    """An empty installation: no libraries, no database."""
-    root = tmp_path / "home"
-    patch_home(monkeypatch, root, fake_chat, fake_embeddings)
-    yield root
+    """An installation with one empty project "test" (active); returns the project folder."""
+    project_dir = patch_home(monkeypatch, tmp_path / "home", fake_chat, fake_embeddings)
+    with active(PROJECT):
+        yield project_dir
     from articles_agent import graph, store
     for fn in (store.parsed_pages, graph.get_retriever, graph.get_graph):
         fn.cache_clear()
+
+
+@pytest.fixture
+def app_home(workspace) -> Path:
+    """The installation root: .env, shared/, projects/."""
+    return workspace.parents[1]
 
 
 def write_zotero_like_library(folder: Path, pdfs: dict[str, Path]) -> Path:
@@ -208,9 +227,10 @@ def built_template(tmp_path_factory, sample_pdfs) -> Path:
     try:
         patch_home(mp, root, FakeChat(), FakeEmbeddings())
         bib = write_zotero_like_library(root.parent, sample_pdfs)
-        add_source("zotero", str(bib), str(sample_pdfs["doe_topology_2021"].parent), use_crossref=False)
-        run_ingest(progress=lambda *a: None)
-        run_index(progress=lambda *a: None)
+        with active(PROJECT):
+            add_source("zotero", str(bib), str(sample_pdfs["doe_topology_2021"].parent), use_crossref=False)
+            run_ingest(progress=lambda *a: None)
+            run_index(progress=lambda *a: None)
     finally:
         mp.undo()
     return root
@@ -218,9 +238,10 @@ def built_template(tmp_path_factory, sample_pdfs) -> Path:
 
 @pytest.fixture
 def built(workspace, built_template) -> Path:
-    """An installation with a ready database of the three sample papers."""
-    for name in ("library", "data"):
-        shutil.copytree(built_template / name, workspace / name, dirs_exist_ok=True)
+    """Project "test" with a ready database of the three sample papers (+ the shared caches)."""
+    home = workspace.parents[1]
+    shutil.copytree(built_template / "shared", home / "shared", dirs_exist_ok=True)
+    shutil.copytree(built_template / "projects" / PROJECT, workspace, dirs_exist_ok=True)
     return workspace
 
 

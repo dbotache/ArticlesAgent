@@ -6,9 +6,9 @@ from functools import cache
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
-from .config import PROJECT_ROOT
+from .config import APP_HOME
 
-load_dotenv(PROJECT_ROOT / ".env")
+load_dotenv(APP_HOME / ".env")  # shared by all projects
 
 
 def _base_url() -> str:
@@ -60,7 +60,7 @@ def missing_settings() -> list[str]:
 
 def save_settings(values: dict[str, str]) -> None:
     """Write the given variables into .env (other lines are kept) and apply them now."""
-    env = PROJECT_ROOT / ".env"
+    env = APP_HOME / ".env"
     lines = env.read_text(encoding="utf-8").splitlines() if env.exists() else []
     values = {k: v.strip() for k, v in values.items()}
     out, done = [], set()

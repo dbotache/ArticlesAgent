@@ -21,7 +21,7 @@ def test_collect_and_upload(workspace, tmp_path, sample_pdfs):
     data = sample_pdfs["smith_reinforcement_2020"].read_bytes()
     first, again = save_upload("../../evil/name.pdf", data), save_upload("name.pdf", data)
     assert first == again  # same content, same place
-    assert first.is_relative_to(library.UPLOADS)  # no path traversal from the browser file name
+    assert first.is_relative_to(library.uploads_dir())  # no path traversal from the browser file name
 
 
 def test_register_skips_duplicates(built, tmp_path, sample_pdfs):

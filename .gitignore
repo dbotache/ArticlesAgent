@@ -5,3 +5,5 @@ data/
 .env
 My_Library.bib
 library/
+projects/
+shared/

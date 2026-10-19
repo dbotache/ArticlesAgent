@@ -8,14 +8,17 @@
 import argparse
 from pathlib import Path
 
+from .config import add_project_option, apply_project_option
 from .library import collect_pdfs, register_pdfs, update_database
 
 
 def main():
     ap = argparse.ArgumentParser()
+    add_project_option(ap)
     ap.add_argument("paths", nargs="+", help="PDF files and/or folders")
     ap.add_argument("--no-crossref", action="store_true", help="skip the Crossref DOI lookup")
     args = ap.parse_args()
+    apply_project_option(args)
 
     pdfs = []
     for p in map(Path, args.paths):
@@ -30,7 +33,7 @@ def main():
         for r in results:
             if r["status"] == "added" and not per_paper.get(r["paper_id"]):
                 print(f"warning: no text extracted from {r['file']} (scanned PDF?)")
-        print(f"indexed {report['index']['embedded']} new chunks; "
+        print(f"indexed {report['index']['added']} new chunks; "
               f"index holds {report['index']['total']} chunks")
 
 
