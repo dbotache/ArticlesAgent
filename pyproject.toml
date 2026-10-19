@@ -1,0 +1,26 @@
+[project]
+name = "articles-agent"
+version = "0.1.0"
+description = "RAG over a Zotero library with page-accurate citations"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "pymupdf4llm>=1.27",
+    "bibtexparser==1.4.3",
+    "pyyaml>=6",
+    "tqdm>=4",
+    "python-dotenv>=1",
+    "openai>=1.50",
+    "langchain-openai>=0.3",
+    "chromadb>=1.0",
+    "rank-bm25>=0.2",
+    "numpy>=1.26",
+    "langgraph>=1.0",
+    "rapidfuzz>=3",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/articles_agent"]

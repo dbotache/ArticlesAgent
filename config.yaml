@@ -1,0 +1,36 @@
+library:
+  bib_file: "My Library.bib"
+  storage_dir: /home/diego/Zotero/storage
+
+# Generated artefacts (parsed page cache, chunks, metadata, later the vector index)
+data_dir: data
+
+ingest:
+  workers: 4            # parallel PDF parser processes
+
+chunking:
+  chunk_size: 2500      # characters (~600 tokens)
+  chunk_overlap: 300    # characters carried over within the same section
+  exclude_references: true
+
+index:
+  batch_size: 128       # chunks per embedding request
+  min_chars: 80         # drop fragments (lone captions, page debris)
+  # regexes on the section heading; matching chunks are not searchable
+  exclude_sections:
+    - '^(table of )?contents$'
+    - '^index$'
+    - '^inhalt(sverzeichnis)?$'
+    - '^(stichwort|sach)verzeichnis$'
+
+retrieval:
+  k: 8                  # chunks handed to the LLM
+  candidates: 50        # per retriever, before fusion
+
+answer:
+  per_query_k: 12       # hits kept per rewritten query
+  grade_candidates: 20  # fused hits shown to the relevance grader
+  max_sources: 10       # passages handed to the answer model
+  min_sources: 2        # fewer relevant passages -> rewrite queries and search again
+  max_attempts: 2       # search rounds at most
+  fuzzy_threshold: 90   # % similarity for snapping a near-verbatim quote to the source

@@ -1,0 +1,16 @@
+# Retrieval benchmark: questions whose answer you know (citation key + optional pages).
+# These are STARTER examples — replace/extend with 10-20 questions from your own research.
+# `papers` may list several keys if more than one paper is a correct answer.
+
+- question: How can deep belief networks reduce the number of SIMP iterations in topology optimization?
+  papers: [kallioras_accelerated_2020]
+  pages: [6, 7]
+
+- question: Which approach uses a CNN to predict the sensitivity of the average torque to decide where to optimize torque ripple?
+  papers: [sasaki_explainable_2021]
+
+- question: Using a convolutional network to predict 3D optimized structures from early iterations of the optimizer
+  papers: [banga_3d_nodate]
+
+- question: Mit welchem Verfahren kann man die Pareto-Front bei der Topologieoptimierung von Motoren schneller berechnen?
+  papers: [doi_multi-objective_2019]
