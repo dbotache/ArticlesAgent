@@ -9,7 +9,8 @@ Ask a research question in English or German and get back:
 - the exact **PDF page** and **section** of every quote,
 - an APA-style **reference list** generated from your reference manager's export.
 
-Built with LangChain, LangGraph, Chroma and Azure OpenAI.
+Built with LangChain, LangGraph and Chroma; models from Azure OpenAI, OpenAI, Anthropic (Claude) or any
+OpenAI-compatible server (Ollama, LM Studio, vLLM, OpenRouter, …).
 
 ---
 
@@ -80,13 +81,13 @@ flowchart TD
 - Python 3.11–3.13 (the project venv uses 3.12) and [uv](https://docs.astral.sh/uv/)
 - A reference library with PDFs, exported as **BibTeX/BibLaTeX** or **RIS** (see
   [Supported reference managers](#supported-reference-managers))
-- An Azure OpenAI resource with three deployments (a single chat deployment can serve both roles):
+- Access to the models, from one or several providers (details in [Models and providers](#models-and-providers)):
 
-| Role | Env variable | Current deployment |
+| Role | Providers | Example |
 |---|---|---|
-| Embeddings | `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | `text-embedding-3-small` |
-| Answer generation | `AZURE_OPENAI_CHAT_DEPLOYMENT` | `gpt-4.1-mini` |
-| Query rewriting, relevance grading | `AZURE_OPENAI_FAST_DEPLOYMENT` (optional, falls back to chat) | `gpt-4.1-mini` |
+| Answer generation | Azure OpenAI, OpenAI, Anthropic, OpenAI-compatible | `gpt-5.4`, `claude-opus-5-5`, `llama3.3` |
+| Query rewriting, relevance grading (optional, defaults to the answer model) | same | `gpt-5.4-mini`, `claude-haiku-5-5` |
+| Embeddings | Azure OpenAI, OpenAI, OpenAI-compatible (Anthropic has none) | `text-embedding-3-small`, `nomic-embed-text` |
 
 ### Installation
 
@@ -99,8 +100,9 @@ uv pip install --python .venv/bin/python -e .
 
 On first start, the app opens a **setup page** with three steps:
 
-1. **Azure OpenAI connection:** endpoint, key and deployment names, saved to `.env` and tested with
-   one small call per deployment.
+1. **Models & API keys:** provider and model for answers, optionally a separate search helper, the
+   embedding model for new projects, and the API keys of the chosen providers. Saved to `.env` and
+   tested with one small call per model.
 2. **Reference library:** choose the reference manager, give the export file (path, or upload) and
    the PDF folder. **Check** previews how many references and PDFs were found. You can add
    several libraries; papers that appear in more than one are kept only once.
@@ -108,18 +110,58 @@ On first start, the app opens a **setup page** with three steps:
    1–2 minutes per 10 PDFs, depending on the embedding rate limit). When it is done, the app switches
    to the chat.
 
-Instead of the form, `.env` can also be written by hand (`cp .env.example .env`):
+Instead of the form, `.env` can also be written by hand, for example:
 
 ```ini
-AZURE_OPENAI_ENDPOINT=https://<resource>.cognitiveservices.azure.com/
+CHAT_PROVIDER=anthropic              # azure | openai | anthropic | compatible
+CHAT_MODEL=claude-opus-5-5
+FAST_PROVIDER=openai                 # optional; without FAST_MODEL the chat model does both
+FAST_MODEL=gpt-5.4-mini
+EMBEDDING_PROVIDER=openai            # azure | openai | compatible – default for NEW projects
+EMBEDDING_MODEL=text-embedding-3-small
+
+ANTHROPIC_API_KEY=...
+OPENAI_API_KEY=...
+AZURE_OPENAI_ENDPOINT=https://<resource>.openai.azure.com/
 AZURE_OPENAI_API_KEY=...
-AZURE_OPENAI_EMBEDDING_DEPLOYMENT=text-embedding-3-small
-AZURE_OPENAI_CHAT_DEPLOYMENT=gpt-4.1-mini
-AZURE_OPENAI_FAST_DEPLOYMENT=gpt-4.1-mini
+COMPATIBLE_BASE_URL=http://localhost:11434/v1   # e.g. Ollama
+COMPATIBLE_API_KEY=                             # optional
 ```
 
-The code talks to Azure through the **v1 API** (`<endpoint>/openai/v1/`), so no `api-version` is
+The older Azure-only settings (`AZURE_OPENAI_CHAT_DEPLOYMENT`, `AZURE_OPENAI_FAST_DEPLOYMENT`,
+`AZURE_OPENAI_EMBEDDING_DEPLOYMENT`) still work: without `CHAT_PROVIDER` they mean "Azure with these
+deployments". Azure is used through its **v1 API** (`<endpoint>/openai/v1/`), so no `api-version` is
 needed. `.env` is git-ignored; never commit it.
+
+### Models and providers
+
+**Chat models can be changed at any time** (⚙️ *Models & API keys*), because nothing in the database
+depends on them. Every answer records which models produced it (`Result.models`, and a "Models:" line in
+the Markdown export), so results stay traceable after a switch.
+
+| Provider | Chat | Embeddings | Notes |
+|---|---|---|---|
+| Azure OpenAI | ✓ | ✓ | the model field is the **deployment name** |
+| OpenAI | ✓ | ✓ | |
+| Anthropic (Claude) | ✓ | — | uses Claude's native structured outputs (current Claude models reject forced tool use) and no custom temperature |
+| OpenAI-compatible | ✓ | ✓ | Ollama, LM Studio, vLLM, OpenRouter, Mistral, … via `COMPATIBLE_BASE_URL`; if a server doesn't support JSON-schema output, set `STRUCTURED_OUTPUT_METHOD=function_calling` (or `json_mode`) |
+
+The model lists in the app are suggestions; any model name the provider offers can be typed in.
+
+**The embedding model is pinned per project.** A database only works with the embedding model that
+built it: query vectors and passage vectors must come from the same model. So:
+
+- On its first build, a project records its embedding model in `project.json` (provider, model,
+  identity, dimensions). From then on its search always uses that model, whatever the default is.
+- The *default* embedding model in the settings only applies to **new** projects.
+- Projects built before pins existed are pinned automatically from their index's own record.
+- At query time the vector length is checked against the pinned dimensions. If the model behind an Azure
+  deployment was swapped, you get a clear error instead of silently wrong results.
+- **Changing** a project's embedding model is an explicit action: 🗂 *Project settings* → *Embedding
+  model* → *Change the embedding model…* shows the number of passages, how many are already in the
+  shared cache for the new model, and the tokens to embed. Then **Re-embed project** rebuilds the
+  index in the background. The shared cache keeps vectors per model, so switching back costs nothing.
+- In cross-project search, each project is searched with its own embedding model.
 
 ### Supported reference managers
 
@@ -257,8 +299,10 @@ Chroma metadata per chunk: `paper_id`, `section`, `page_start`, `page_end`, `yea
 
 Indexing is **incremental**: only chunks not yet in the collection are embedded, and chunks that
 disappeared after a re-ingestion are deleted. The collection remembers which embedding model built
-it, and refuses to run with a different one. After changing `AZURE_OPENAI_EMBEDDING_DEPLOYMENT`, run
-`python -m articles_agent.index --rebuild`.
+it. That model is pinned in the project ([Models and providers](#models-and-providers)); to use
+another one, re-embed the project (app: *Project settings*; CLI: change the pin, then
+`python -m articles_agent.libraries sync --rebuild`). Vectors already in the shared cache for the
+target model are reused.
 
 Rate limits (HTTP 429) are handled by automatic retries with back-off. Indexing speed is limited by
 the deployment's tokens-per-minute (TPM) setting: about 9 M tokens took about 80 minutes at roughly 115 k TPM.
@@ -526,7 +570,7 @@ The full graph adds query rewriting, which, for example, makes German questions 
 uv pip install --python .venv/bin/python -e ".[test]"
 .venv/bin/python -m pytest                       # ~25 s, offline, no Azure costs
 .venv/bin/python -m pytest -m "not integration"  # without subprocess / server tests
-ARTICLES_AGENT_LIVE_TESTS=1 .venv/bin/python -m pytest -m live   # real Azure deployments (a few cents)
+ARTICLES_AGENT_LIVE_TESTS=1 .venv/bin/python -m pytest -m live   # the configured real models (a few cents)
 ```
 
 Every test runs in a **temporary installation**: its own `library/`, `data/` and `.env`, three generated
@@ -547,7 +591,8 @@ the network blocked. Your real library, index and `.env` are never touched.
 | `test_settings_jobs.py` | saving `.env` (file mode 600), connection check, background job runner |
 | `test_app.py` | the Streamlit UI headless (AppTest): setup page for a new user → build → chat, answers, filters, errors, adding/removing papers and libraries |
 | `test_deployment.py` | **web hosting**: server health endpoint, data home separate from code (`ARTICLES_AGENT_HOME`), configuration via environment variables only, API key never sent to the browser, dependencies declared, no personal paths, `.gitignore` |
-| `test_live_azure.py` | opt-in: every deployment responds, and the real model follows the citation contract |
+| `test_models.py` | providers: legacy and new settings, clients per provider (Claude without temperature, local servers without key), structured-output method per provider, embedding pin on build, unaffected by a new default, pin from older indexes, dimension check, re-embedding and switching back via the cache, provenance in answers |
+| `test_live_models.py` | opt-in: every configured model responds, and the real chat model follows the citation contract |
 
 **Public hosting checklist.** `test_deployment.py` also contains tests marked
 `xfail(strict=True)` for what is still missing before the app can face anonymous visitors on a website:
@@ -623,7 +668,7 @@ ArticlesAgent/
 │   ├── ingest.py           CLI: parse + chunk the whole library
 │   ├── inspect_chunks.py   CLI: inspect ingestion results
 │   ├── store.py            shared access to chunks, papers, page cache, Chroma
-│   ├── llm.py              Azure OpenAI chat + embedding clients (v1 API)
+│   ├── llm.py              providers, chat models, embedding clients, structured output, settings
 │   ├── index.py            CLI: embed chunks into Chroma
 │   ├── retriever.py        hybrid dense + BM25 search with RRF
 │   ├── search.py           CLI: retrieval only
@@ -709,8 +754,10 @@ without jumping to the page, instead of *Open in Zotero*.
 - Only quotes are verified; the summary is LLM synthesis (see §7).
 - With the free Azure tier, data is processed in *Global Standard* deployments, so it may be processed outside the EU.
 - `gpt-4.1-mini` occasionally produces quotes longer than 3 sentences, or findings whose quotes can't be
-  verified (these are dropped). A larger chat model follows the rules more reliably; switching only
-  requires changing `AZURE_OPENAI_CHAT_DEPLOYMENT`.
+  verified (these are dropped). A larger chat model follows the rules more reliably; switch it under
+  ⚙️ *Models & API keys*.
+- Small local models (OpenAI-compatible servers) may not follow the structured-output schema reliably;
+  invalid answers then fail with an error in the chat.
 
 **Roadmap**
 
@@ -720,5 +767,6 @@ without jumping to the page, instead of *Open in Zotero*.
 - [x] Streamlit chat UI: chat history, expandable sources, year/paper filters, Markdown export
 - [x] Setup page for new users; Zotero, JabRef, Citavi, Mendeley, EndNote and generic BibTeX/RIS libraries
 - [x] Projects with shared caches, tag filters per library, optional search across all projects
+- [x] Azure OpenAI, OpenAI, Anthropic and OpenAI-compatible providers; switchable chat models; embedding model pinned per project with re-embedding
 - [ ] Batch topic reports: `topics.yaml` → one cited Markdown/DOCX report per topic
 - [ ] Extend `eval/questions.yaml` to 10–20 questions; optionally add a cross-encoder reranker

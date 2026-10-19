@@ -8,12 +8,16 @@ import streamlit as st
 from . import jobs
 from .config import load_config
 from .library import collect_pdfs, register_pdfs, save_upload, update_database_isolated
-from .llm import SETTINGS, check_connection, embedding_deployment, missing_settings, save_settings
+from .index import reembed_estimate
+from .llm import (CHAT_PROVIDERS, CREDENTIAL_LABELS, EMBEDDING_PROVIDERS, PROVIDERS, SECRET_KEYS,
+                  EmbeddingSpec, chat_spec, check_connection, default_embedding_spec, missing_settings,
+                  save_settings)
 from .sources import (MANAGERS, Source, add_source, keyword_counts, load_sources, read_source,
                       remove_source, save_uploaded_export, set_keywords, validate)
 from .store import get_collection
 from .graph import get_retriever
-from .projects import Project, create_project, delete_project, update_project
+from .projects import (Project, create_project, delete_project, embedding_pin, embedding_spec,
+                       pin_embedding, update_project)
 
 ZOTERO_STORAGE = Path.home() / "Zotero" / "storage"
 
@@ -40,10 +44,10 @@ MANAGER_HELP = {
 
 def index_size() -> int:
     """Number of indexed passages (0 if there is no usable index yet)."""
-    if missing_settings() or not (load_config()["data_dir"] / "chunks.jsonl").exists():
+    if missing_settings((embedding_spec(),)) or not (load_config()["data_dir"] / "chunks.jsonl").exists():
         return 0
     try:
-        return get_collection(load_config(), embedding_deployment()).count()
+        return get_collection(load_config(), embedding_spec().identity).count()
     except Exception:
         return 0
 
@@ -58,12 +62,13 @@ def _summary(report: dict) -> list[str]:
     return lines
 
 
-def start_update(label: str, before=None) -> None:
-    """Run `before(job)` (optional) and then the incremental database update in the background."""
+def start_update(label: str, before=None, rebuild: bool = False) -> None:
+    """Run `before(job)` (optional) and then the incremental database update in the background
+    (rebuild: re-embed the whole index)."""
     def work(job: jobs.Job):
         if before and before(job) is False:
             return
-        job.log += _summary(update_database_isolated(progress=job.progress))
+        job.log += _summary(update_database_isolated(progress=job.progress, rebuild=rebuild))
 
     if not jobs.start(label, work):
         st.warning("Another update is still running.")
@@ -105,32 +110,80 @@ def render_job(on_finished) -> bool:
     return False
 
 
-# ------------------------------------------------------------ Azure connection
+# ------------------------------------------------------------ models and API keys
 
-def render_connection():
-    st.caption("Stored in the project's `.env` file on this computer.")
-    # cleared after submit, so the key doesn't stay in the browser's form field
-    with st.form("azure_settings", clear_on_submit=True):
-        values = {}
-        for key, label in SETTINGS.items():
-            current = os.environ.get(key, "")
-            if key == "AZURE_OPENAI_API_KEY":
-                values[key] = st.text_input(label, type="password",
-                                            placeholder="•••• saved — leave empty to keep" if current else "")
-            else:
-                values[key] = st.text_input(label, value=current)
-        submitted = st.form_submit_button("Save and test connection", type="primary")
-    if submitted:
-        values = {k: v for k, v in values.items() if v.strip() or k != "AZURE_OPENAI_API_KEY"}
-        if missing := [SETTINGS[k] for k in SETTINGS if k in values and not values[k].strip()
-                       and k != "AZURE_OPENAI_FAST_DEPLOYMENT"]:
-            st.error("Please fill in: " + ", ".join(missing))
+def _model_picker(label: str, providers: list[str], current, key: str, kind: str = "chat") -> tuple[str, str]:
+    left, right = st.columns([2, 3])
+    provider = left.selectbox(f"{label}: provider", providers, format_func=lambda p: PROVIDERS[p].name,
+                              index=providers.index(current.provider) if current.provider in providers else 0,
+                              key=f"{key}_provider")
+    info = PROVIDERS[provider]
+    options = list(info.chat_models if kind == "chat" else info.embedding_models)
+    chosen = current.model if current.provider == provider else ""
+    if chosen and chosen not in options:
+        options.insert(0, chosen)
+    model = right.selectbox(f"{label}: model", options, accept_new_options=True, key=f"{key}_model_{provider}",
+                            index=options.index(chosen) if chosen in options else (0 if options else None),
+                            placeholder="Type a model name", help=info.model_hint + " — any name can be typed in.")
+    return provider, (model or "").strip()
+
+
+def render_models(pinned=()) -> None:
+    """Chat models (switchable any time), default embedding model for new projects, API keys.
+    `pinned`: embedding specs of existing projects, whose credentials are needed too."""
+    if st.session_state.pop("_clear_secrets", False):  # before the widgets exist
+        for k in SECRET_KEYS:
+            st.session_state[f"cred_{k}"] = ""
+    st.caption("Stored in `.env` in the app folder and shared by all projects. The chat models can be "
+               "changed at any time.")
+    chat = _model_picker("Answers", CHAT_PROVIDERS, chat_spec(), "m_chat")
+    same = st.checkbox("Use the same model for query rewriting and relevance checks",
+                       value=chat_spec(fast=True) == chat_spec(), key="m_same")
+    fast = chat if same else _model_picker("Search helper", CHAT_PROVIDERS, chat_spec(fast=True), "m_fast")
+    emb = _model_picker("Embeddings for new projects", EMBEDDING_PROVIDERS, default_embedding_spec(),
+                        "m_emb", kind="embedding")
+    st.caption("Existing projects keep the embedding model their database was built with — "
+               "see 🗂 Project settings → Embedding model.")
+
+    needed = {chat[0], fast[0], emb[0], *(p.provider for p in pinned)}
+    in_use = [k for prov in PROVIDERS if prov in needed
+              for k in PROVIDERS[prov].credentials + PROVIDERS[prov].optional]
+    others = [k for k in CREDENTIAL_LABELS if k not in in_use]
+
+    def field(k: str):
+        current = os.environ.get(k, "")
+        if k in SECRET_KEYS:
+            return st.text_input(CREDENTIAL_LABELS[k], type="password", key=f"cred_{k}",
+                                 placeholder="•••• saved — leave empty to keep" if current else "")
+        return st.text_input(CREDENTIAL_LABELS[k], value=current, key=f"cred_{k}")
+
+    st.markdown("**API keys and endpoints**")
+    values = {k: field(k) for k in in_use}
+    with st.expander("Other providers"):
+        values |= {k: field(k) for k in others}
+
+    if st.button("Save and test", type="primary", key="m_save"):
+        if not chat[1] or not fast[1] or not emb[1]:
+            st.error("Choose or type a model name for each role.")
             return
+        values = {k: v for k, v in values.items() if v.strip() or k not in SECRET_KEYS}  # keep saved keys
+        values |= {"CHAT_PROVIDER": chat[0], "CHAT_MODEL": chat[1],
+                   "FAST_PROVIDER": "" if same else fast[0], "FAST_MODEL": "" if same else fast[1],
+                   "EMBEDDING_PROVIDER": emb[0], "EMBEDDING_MODEL": emb[1]}
         save_settings(values)
-        with st.spinner("Testing the deployments…"):
-            st.session_state.connection_checks = check_connection()
+        if missing := missing_settings(tuple(pinned)):
+            st.session_state.connection_checks = [("Missing", False, ", ".join(CREDENTIAL_LABELS.get(m, m)
+                                                                               for m in missing))]
+        else:
+            with st.spinner("Testing the models…"):
+                st.session_state.connection_checks = check_connection(tuple(pinned))
+        st.session_state._clear_secrets = True  # keys don't stay in the browser's form fields
+        st.rerun()
     for label, ok, msg in st.session_state.get("connection_checks", []):
         (st.success if ok else st.error)(f"{label}: {msg}")
+
+
+render_connection = render_models  # older name
 
 
 # ------------------------------------------------------------ library sources
@@ -189,7 +242,8 @@ def render_add_source(key: str, first: bool = False):
     left, right = st.columns(2)
     check = left.button("Check", key=f"{key}_check", disabled=bool(problems), use_container_width=True)
     go = right.button("Build database" if first else "Add library", type="primary", key=f"{key}_go",
-                      disabled=bool(problems) or missing_settings() != [], use_container_width=True)
+                      disabled=bool(problems) or missing_settings((embedding_spec(),)) != [],
+                      use_container_width=True)
     if ref_path.strip() and problems:
         st.error(" ".join(problems))
     if check:
@@ -305,6 +359,7 @@ def render_project_settings(project: Project) -> None:
             else:
                 st.rerun()
     st.caption(f"Folder: `{project.dir}`")
+    render_embedding_settings(project)
     sure = st.checkbox("Delete this project's libraries settings, index and uploads", key=f"del_ok_{project.slug}",
                        help="Your PDFs and reference-manager exports are not touched; shared caches stay, "
                             "so re-creating the project later is fast.")
@@ -317,3 +372,35 @@ def render_project_settings(project: Project) -> None:
         get_retriever.cache_clear()
         st.session_state.pop("project", None)
         st.rerun()
+
+
+def render_embedding_settings(project: Project) -> None:
+    """The project's pinned embedding model, and re-embedding with another one."""
+    st.markdown("**Embedding model**")
+    pin = embedding_pin(project.slug)
+    spec = embedding_spec(project.slug)
+    if not pin:
+        st.caption(f"Not built yet — the database will use `{spec.label}`, the default for new projects.")
+        return
+    st.caption(f"`{spec.label}` · {pin.get('dimensions') or '?'} dimensions · since {pin['pinned'][:10]}. "
+               "Search in this project always uses this model, whatever the default for new projects is.")
+    if not st.toggle("Change the embedding model…", key=f"emb_change_{project.slug}"):
+        return
+    provider, model = _model_picker("New embedding model", EMBEDDING_PROVIDERS, spec, f"emb_{project.slug}",
+                                    kind="embedding")
+    new = EmbeddingSpec(provider, model, os.environ.get("COMPATIBLE_BASE_URL", "") if provider == "compatible" else "")
+    if not model or new.identity == spec.identity:
+        return
+    if missing := missing_settings((new,)):
+        st.error("Set up first under ⚙️ Models & API keys: " + ", ".join(CREDENTIAL_LABELS.get(m, m) for m in missing))
+        return
+    est = reembed_estimate(new)
+    st.warning(f"Re-embedding replaces this project's index. {est['passages']:,} passages, "
+               f"{est['cached']:,} of them already in the shared cache for `{new.label}`; "
+               f"about **{est['tokens']:,} tokens** to embed. Until it is done, search in this project "
+               "is unavailable.")
+    sure = st.checkbox("Re-embed this project with the new model", key=f"emb_ok_{project.slug}")
+    if st.button("🔁 Re-embed project", disabled=not sure, key=f"emb_go_{project.slug}"):
+        pin_embedding(project.slug, new)
+        get_retriever.cache_clear()
+        start_update(f"Re-embedding {project.name} with {new.label}", rebuild=True)

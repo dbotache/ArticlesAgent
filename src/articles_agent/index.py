@@ -14,7 +14,9 @@ from tqdm import tqdm
 
 from . import embcache
 from .config import add_project_option, apply_project_option, load_config
-from .llm import embedding_deployment, get_embeddings
+from .config import current_project
+from .llm import get_embeddings
+from .projects import embedding_pin, embedding_spec, pin_embedding
 from .store import COLLECTION, embed_text, get_collection, load_chunks, load_papers
 
 
@@ -45,14 +47,18 @@ def main():
 def run_index(rebuild: bool = False, progress=None) -> dict:
     """Embed all searchable chunks not yet in the index. progress(stage, done, total) is optional."""
     cfg = load_config()
-    model = embedding_deployment()
+    spec = embedding_spec()  # pinned for this project (or the default before its first build)
+    model = spec.identity
     if rebuild:
         client = chromadb.PersistentClient(path=str(cfg["data_dir"] / "chroma"))
         if COLLECTION in [c.name for c in client.list_collections()]:
             client.delete_collection(COLLECTION)
     col = get_collection(cfg, model, create=True)
     if (col.metadata or {}).get("embedding_model") != model:
-        raise SystemExit(f"Index uses {col.metadata.get('embedding_model')}, not {model}: use --rebuild")
+        # only reachable after the project's embedding model was changed on purpose (re-embedding):
+        # the pin decides, so replace the index built with the old model
+        chromadb.PersistentClient(path=str(cfg["data_dir"] / "chroma")).delete_collection(COLLECTION)
+        col = get_collection(cfg, model, create=True)
 
     papers = load_papers(cfg)
     chunks = load_chunks(cfg)
@@ -62,10 +68,11 @@ def run_index(rebuild: bool = False, progress=None) -> dict:
         col.delete(ids=stale)
     todo = [c for c in chunks if c["chunk_id"] not in existing]
 
-    embeddings = get_embeddings()
+    embeddings = get_embeddings(spec)
     batch = cfg["index"]["batch_size"]
     starts = range(0, len(todo), batch)
     embedded = reused = 0
+    dims = None
     for n, i in enumerate(tqdm(starts, desc="Embedding", unit="batch", disable=progress is not None), 1):
         part = todo[i:i + batch]
         texts = [embed_text(c, papers[c["paper_id"]]) for c in part]
@@ -77,6 +84,7 @@ def run_index(rebuild: bool = False, progress=None) -> dict:
             embcache.put_many(fresh)
             vectors |= fresh
         embedded += len(missing)
+        dims = dims or len(next(iter(vectors.values())))
         reused += len(part) - len(missing)
         col.add(
             ids=[c["chunk_id"] for c in part],
@@ -86,8 +94,24 @@ def run_index(rebuild: bool = False, progress=None) -> dict:
         )
         if progress:
             progress("embed", n, len(starts))
+    pin = embedding_pin()
+    if not pin or pin.get("identity") != model or (dims and not pin.get("dimensions")):
+        pin_embedding(current_project(), spec, dims or (pin or {}).get("dimensions"))
     return {"searchable": len(chunks), "added": len(todo), "embedded": embedded, "reused": reused,
             "removed": len(stale), "total": col.count(), "model": model}
+
+
+def reembed_estimate(spec) -> dict:
+    """What re-embedding the active project with `spec` would cost: passages, how many are
+    already in the shared cache for that model, and the tokens to embed (≈ 4 characters each)."""
+    cfg = load_config()
+    papers = load_papers(cfg)
+    chunks = load_chunks(cfg)
+    texts = [embed_text(c, papers[c["paper_id"]]) for c in chunks]
+    keys = [embcache.cache_key(spec.identity, t) for t in texts]
+    cached = embcache.known(keys)
+    missing_chars = sum(len(t) for t, k in zip(texts, keys) if k not in cached)
+    return {"passages": len(chunks), "cached": len(cached), "tokens": missing_chars // 4}
 
 
 if __name__ == "__main__":

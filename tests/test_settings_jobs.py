@@ -10,9 +10,10 @@ from articles_agent import jobs, llm
 
 def test_missing_settings(workspace, monkeypatch):
     assert llm.missing_settings() == []
-    monkeypatch.delenv("AZURE_OPENAI_API_KEY")
-    monkeypatch.delenv("AZURE_OPENAI_FAST_DEPLOYMENT")  # optional
-    assert llm.missing_settings() == ["AZURE_OPENAI_API_KEY"]
+    monkeypatch.delenv("OPENAI_API_KEY")
+    assert llm.missing_settings() == ["OPENAI_API_KEY"]
+    monkeypatch.setenv("CHAT_PROVIDER", "anthropic")
+    assert llm.missing_settings() == ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]  # embeddings still OpenAI
 
 
 def test_save_settings_keeps_other_lines_and_is_private(app_home, monkeypatch):
@@ -43,7 +44,7 @@ def test_check_connection_reports_failures(workspace, monkeypatch):
             raise RuntimeError("401 Unauthorized")
         def invoke(self, _):
             raise RuntimeError("DeploymentNotFound")
-    monkeypatch.setattr(llm, "get_embeddings", lambda: Broken())
+    monkeypatch.setattr(llm, "get_embeddings", lambda spec=None: Broken())
     monkeypatch.setattr(llm, "get_chat", lambda fast=False: Broken())
     checks = llm.check_connection()
     assert [ok for _, ok, _ in checks] == [False, False, False]

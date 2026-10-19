@@ -1,5 +1,6 @@
 """The Streamlit app, driven headlessly with AppTest (fake models, temporary installation)."""
 
+import re
 import shutil
 import time
 from pathlib import Path
@@ -60,29 +61,37 @@ def by_label(widgets, label_part):
 # ------------------------------------------------------------------ setup page
 
 
-def test_setup_page_asks_for_azure_first(workspace, monkeypatch):
+def test_setup_page_asks_for_models_first(workspace, monkeypatch):
     for key in FAKE_ENV:
         monkeypatch.delenv(key)
     at = run_app()
     assert at.title[0].value == "📚 Set up “Test project”"
-    assert "Set up the Azure connection first." in texts(at)
-    assert by_label(at.text_input, "API key").value == ""
+    assert "Set up the models and API keys first." in texts(at)
+    assert all(w.value == "" for w in at.text_input if "API key" in w.label)
 
 
-def test_setup_saves_and_tests_azure_settings(app_home, monkeypatch):
+def test_setup_saves_models_and_keys(app_home, monkeypatch):
     for key in FAKE_ENV:
         monkeypatch.delenv(key)
     at = run_app()
-    by_label(at.text_input, "Endpoint").set_value("https://res.openai.azure.com/")
-    by_label(at.text_input, "API key").set_value("new-secret-key")
-    by_label(at.text_input, "Embedding deployment").set_value("fake-embed")
-    by_label(at.text_input, "Chat deployment").set_value("fake-chat")
-    at.button[0].click().run()  # "Save and test connection"
-    assert not at.exception
-    assert "AZURE_OPENAI_API_KEY=new-secret-key" in (app_home / ".env").read_text()
+    at.selectbox(key="m_chat_provider").set_value("anthropic").run()
+    at.selectbox(key="m_chat_model_anthropic").set_value("claude-opus-5-5").run()
+    at.selectbox(key="m_emb_provider").set_value("openai").run()
+    at.selectbox(key="m_emb_model_openai").set_value("text-embedding-3-large").run()
+    # only the keys of the chosen providers are shown up front
+    shown = [w.label for w in at.text_input]
+    assert "Anthropic API key" in shown and "OpenAI API key" in shown
+    at.text_input(key="cred_ANTHROPIC_API_KEY").set_value("anthropic-secret")
+    at.text_input(key="cred_OPENAI_API_KEY").set_value("openai-secret")
+    at.button(key="m_save").click().run()
+    assert not at.exception, [e.value for e in at.exception]
+    env = (app_home / ".env").read_text()
+    for line in ("CHAT_PROVIDER=anthropic", "CHAT_MODEL=claude-opus-5-5", "EMBEDDING_PROVIDER=openai",
+                 "EMBEDDING_MODEL=text-embedding-3-large", "ANTHROPIC_API_KEY=anthropic-secret"):
+        assert line in env
+    assert "FAST_MODEL" not in env  # same model for both roles
     assert len(at.success) == 3  # embeddings, chat, fast model
-    at.run()  # the form clears on submit; AppTest shows that one run later than a browser
-    assert "new-secret-key" not in " ".join(texts(at))
+    assert "anthropic-secret" not in " ".join(texts(at))  # key fields are cleared after saving
 
 
 def test_setup_adds_library_builds_database_and_opens_chat(workspace, tmp_path, sample_pdfs):
@@ -250,3 +259,19 @@ def test_search_all_projects_toggle(built, sample_pdfs, tmp_path):
     assert len(at.chat_message) == 2
     at.sidebar.toggle(key="all_projects").set_value(False).run()
     assert len(at.chat_message) == 0  # separate chat history per project / all-projects
+
+
+def test_project_settings_reembed(built):
+    at = run_app()
+    captions = " ".join(c.value for c in at.sidebar.caption)
+    assert "`openai:fake-embed` · 64 dimensions" in captions
+    at.sidebar.toggle(key="emb_change_test").set_value(True).run()
+    at.sidebar.selectbox(key="emb_test_model_openai").set_value("text-embedding-3-large").run()
+    warning = " ".join(w.value for w in at.sidebar.warning)
+    assert re.search(r"about \*\*[\d,]+ tokens\*\* to embed", warning)
+    assert at.sidebar.button(key="emb_go_test").disabled  # needs the confirmation
+    at.sidebar.checkbox(key="emb_ok_test").check().run()
+    at.sidebar.button(key="emb_go_test").click().run()
+    at = wait_for_job(at)
+    assert "`openai:text-embedding-3-large`" in " ".join(c.value for c in at.sidebar.caption)
+    assert any(c.value.startswith("3 papers") for c in at.sidebar.caption)  # searchable again

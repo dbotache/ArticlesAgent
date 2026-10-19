@@ -3,7 +3,7 @@
     .venv/bin/streamlit run app.py --server.address localhost
 
 Projects are independent workspaces (own libraries, index and chat). On the very first start the
-app asks for the Azure connection and a first project; a project without a database shows its
+app asks for the models & API keys and a first project; a project without a database shows its
 setup page: reference libraries (Zotero, JabRef, Citavi, Mendeley, EndNote, BibTeX/RIS) → build.
 """
 
@@ -15,12 +15,12 @@ import streamlit as st
 from articles_agent.config import set_project, use_project
 from articles_agent.graph import ask_stream, get_retriever
 from articles_agent.llm import missing_settings
-from articles_agent.projects import list_projects
+from articles_agent.projects import embedding_pin, embedding_spec, list_projects
 from articles_agent.results import Result
 from articles_agent.sources import load_sources
 from articles_agent.store import ZOTERO_KEY
 from articles_agent.ui_library import (index_size, render_add_papers, render_add_source,
-                                       render_connection, render_job, render_new_project,
+                                       render_job, render_models, render_new_project,
                                        render_project_settings, render_project_switcher,
                                        render_sources, start_update)
 
@@ -51,8 +51,8 @@ if not projects:
                 "quotes, page numbers and a reference list. Work is organised in **projects**: each has "
                 "its own libraries (or a tagged part of one), its own database and its own chat.")
     missing = missing_settings()
-    with st.expander(("✅ " if not missing else "") + "**1 · Azure OpenAI connection**", expanded=bool(missing)):
-        render_connection()
+    with st.expander(("✅ " if not missing else "") + "**1 · Models & API keys**", expanded=bool(missing)):
+        render_models()
     st.markdown("**2 · Create your first project**")
     render_new_project("first", first=True)
     st.stop()
@@ -65,6 +65,8 @@ if st.session_state.get("project") not in slugs:
 set_project(st.session_state.project)
 project = next(p for p in projects if p.slug == st.session_state.project)
 names = {p.slug: p.name for p in projects}
+# embedding models existing databases were built with: their credentials are needed too
+pinned = tuple(dict.fromkeys(embedding_spec(p.slug) for p in projects if embedding_pin(p.slug)))
 
 with st.sidebar:
     st.title("📚 ArticlesAgent")
@@ -76,17 +78,17 @@ def setup_page():
     st.markdown("Add the reference libraries for this project — a whole library or only the references "
                 "with certain tags — then build its database. Building runs in the background "
                 "(roughly 1–2 minutes per 10 new PDFs; papers already known from another project are "
-                "reused without new Azure costs).")
+                "reused without new embedding costs).")
     running = render_job(reload_index)
-    missing = missing_settings()
+    missing = missing_settings((embedding_spec(),))
     sources = load_sources()
 
-    with st.expander(("✅ " if not missing else "") + "**1 · Azure OpenAI connection**", expanded=bool(missing)):
-        render_connection()
+    with st.expander(("✅ " if not missing else "") + "**1 · Models & API keys**", expanded=bool(missing)):
+        render_models(pinned)
     with st.expander(("✅ " if sources else "") + "**2 · Reference libraries**",
                      expanded=not missing and not sources):
         if missing:
-            st.caption("Set up the Azure connection first.")
+            st.caption("Set up the models and API keys first.")
         elif sources:
             render_sources()
             st.markdown("**Add another library**")
@@ -159,8 +161,8 @@ with st.sidebar:
         render_add_papers()
     with st.expander("🗂 Project settings"):
         render_project_settings(project)
-    with st.expander("⚙️ Azure connection"):
-        render_connection()
+    with st.expander("⚙️ Models & API keys"):
+        render_models(pinned)
 
     histories = st.session_state.setdefault("histories", {})
     history: list[dict] = histories.setdefault("__all__" if all_mode else project.slug, [])
@@ -251,7 +253,7 @@ if question := st.chat_input("e.g. How is deep learning used to accelerate topol
                     elif node == "cite":
                         result = update["result"]
                 status.update(label=f"Done: {len(result.findings)} cited findings", state="complete")
-            except Exception as exc:  # show Azure / index errors in the UI instead of a traceback
+            except Exception as exc:  # show provider / index errors in the UI instead of a traceback
                 status.update(label="Failed", state="error")
                 st.error(f"{type(exc).__name__}: {exc}")
         if result:

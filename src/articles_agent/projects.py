@@ -8,6 +8,7 @@
 
 import argparse
 import json
+import os
 import re
 import shutil
 import unicodedata
@@ -37,18 +38,76 @@ def _slugify(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", ascii_name.lower()).strip("-")[:40] or "project"
 
 
+FIELDS = {"name", "description", "created"}
+
+
+def _meta(slug: str) -> dict:
+    meta = config.projects_dir() / slug / "project.json"
+    return json.loads(meta.read_text(encoding="utf-8")) if meta.exists() else {}
+
+
 def _read(folder: Path) -> Project | None:
-    meta = folder / "project.json"
-    if not meta.exists():
+    if not (folder / "project.json").exists():
         return None
-    data = json.loads(meta.read_text(encoding="utf-8"))
-    return Project(slug=folder.name, **{k: v for k, v in data.items() if k != "slug"})
+    data = _meta(folder.name)
+    return Project(slug=folder.name, **{k: v for k, v in data.items() if k in FIELDS})
 
 
-def _write(project: Project) -> None:
+def _write(project: Project, **extra) -> None:
+    """Save the project's fields, keeping other keys (e.g. the embedding pin)."""
     project.dir.mkdir(parents=True, exist_ok=True)
-    data = {k: v for k, v in asdict(project).items() if k != "slug"}
-    (project.dir / "project.json").write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    data = _meta(project.slug) | {k: v for k, v in asdict(project).items() if k != "slug"} | extra
+    tmp = project.dir / "project.json.tmp"
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    tmp.replace(project.dir / "project.json")
+
+
+# ------------------------------------------------------------ embedding model (pinned per project)
+
+def embedding_pin(slug: str | None = None) -> dict | None:
+    """{provider, model, base_url, identity, dimensions, pinned} or None (not built yet)."""
+    slug = slug or config.current_project()
+    if pin := _meta(slug).get("embedding"):
+        return pin
+    return _pin_from_index(slug)
+
+
+def embedding_spec(slug: str | None = None):
+    """The embedding model of a project: the one its database was built with, or, before the
+    first build, the default for new projects."""
+    from .llm import EmbeddingSpec, default_embedding_spec
+    pin = embedding_pin(slug)
+    if not pin:
+        return default_embedding_spec()
+    return EmbeddingSpec(pin["provider"], pin["model"], pin.get("base_url", ""))
+
+
+def pin_embedding(slug: str, spec, dimensions: int | None = None) -> None:
+    pin = {**spec.to_dict(), "identity": spec.identity, "dimensions": dimensions,
+           "pinned": datetime.now().isoformat(timespec="seconds")}
+    _write(get_project(slug), embedding=pin)
+
+
+def _pin_from_index(slug: str) -> dict | None:
+    """Projects built before pins existed: take the model from the index's own record."""
+    chroma = config.projects_dir() / slug / "data" / "chroma"
+    if not chroma.is_dir():
+        return None
+    import chromadb
+    from .llm import EmbeddingSpec
+    try:
+        col = chromadb.PersistentClient(path=str(chroma)).get_collection("chunks")
+    except Exception:
+        return None
+    identity = (col.metadata or {}).get("embedding_model")
+    if not identity:
+        return None
+    provider, model = identity.split(":", 1) if ":" in identity else ("azure", identity)
+    base_url = os.environ.get("COMPATIBLE_BASE_URL", "") if provider == "compatible" else ""
+    sample = col.get(limit=1, include=["embeddings"])["embeddings"]
+    dims = len(sample[0]) if len(sample) else None
+    pin_embedding(slug, EmbeddingSpec(provider, model, base_url), dims)
+    return _meta(slug)["embedding"]
 
 
 def list_projects() -> list[Project]:

@@ -35,14 +35,15 @@ def _print_report(src: Source, scan: bool):
         print(f"  broken file links: {rep.broken_links}")
 
 
-def _sync(progress_json: bool = False):
+def _sync(progress_json: bool = False, rebuild: bool = False):
     if progress_json:  # machine-readable progress for the app (library.update_database_isolated)
         def emit(msg):
             print("@@" + json.dumps(msg, ensure_ascii=False), flush=True)
-        report = update_database(progress=lambda s, d, t: emit({"stage": s, "done": d, "total": t}))
+        report = update_database(progress=lambda s, d, t: emit({"stage": s, "done": d, "total": t}),
+                                 rebuild=rebuild)
         emit({"report": report})
         return
-    report = update_database()
+    report = update_database(rebuild=rebuild)
     ing, idx = report["ingest"], report["index"]
     print(f"{ing['pdfs']} PDFs ({ing['parsed']} parsed now), {idx['added']} passages added "
           f"({idx['reused']} from the shared cache), index holds {idx['total']}")
@@ -53,7 +54,9 @@ def main():
     add_project_option(ap)
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("list")
-    sub.add_parser("sync").add_argument("--progress-json", action="store_true", help=argparse.SUPPRESS)
+    p = sub.add_parser("sync")
+    p.add_argument("--progress-json", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--rebuild", action="store_true", help="re-embed the whole index")
     for name in ("check", "add"):
         p = sub.add_parser(name)
         p.add_argument("manager", choices=list(MANAGERS))
@@ -91,7 +94,7 @@ def main():
         remove_source(args.id)
         _sync()
     elif args.cmd == "sync":
-        _sync(args.progress_json)
+        _sync(args.progress_json, args.rebuild)
     elif args.cmd == "keywords":
         for kw, n in keyword_counts(args.reference_file).items():
             print(f"{n:6}  {kw}")

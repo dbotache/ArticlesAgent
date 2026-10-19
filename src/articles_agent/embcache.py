@@ -34,6 +34,17 @@ def get_many(keys: list[str]) -> dict[str, list[float]]:
     return found
 
 
+def known(keys: list[str]) -> set[str]:
+    """Which keys are cached (without loading the vectors)."""
+    found = set()
+    with closing(_db()) as con:
+        for i in range(0, len(keys), 500):
+            part = keys[i:i + 500]
+            found |= {k for (k,) in con.execute(
+                f"SELECT key FROM vectors WHERE key IN ({','.join('?' * len(part))})", part)}
+    return found
+
+
 def put_many(items: dict[str, list[float]]) -> None:
     with closing(_db()) as con, con:
         con.executemany("INSERT OR REPLACE INTO vectors (key, vec) VALUES (?, ?)",
@@ -43,11 +54,11 @@ def put_many(items: dict[str, list[float]]) -> None:
 def seed_from_index() -> int:
     """Copy the active project's indexed vectors into the cache (used by the migration)."""
     from .config import load_config
-    from .llm import embedding_deployment
+    from .projects import embedding_spec
     from .store import embed_text, get_collection, load_chunks, load_papers
 
     cfg = load_config()
-    model = embedding_deployment()
+    model = embedding_spec().identity
     col = get_collection(cfg, model)
     papers = load_papers(cfg)
     chunks = {c["chunk_id"]: c for c in load_chunks(cfg)}

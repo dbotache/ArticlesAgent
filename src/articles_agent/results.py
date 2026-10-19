@@ -26,6 +26,7 @@ class Result:
     references: list[str] = field(default_factory=list)
     queries: list[str] = field(default_factory=list)
     dropped_quotes: int = 0  # findings removed because the quote was not in the source
+    models: dict = field(default_factory=dict)  # {"chat", "fast", "embedding"} that produced it
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -42,4 +43,11 @@ class Result:
             out += [f"_{self.dropped_quotes} finding(s) omitted: quote not found in the source._", ""]
         if self.references:
             out += [f"{h}# References", ""] + [f"- {r}" for r in self.references] + [""]
+        if self.models:
+            parts = [f"answers {self.models['chat']}"]
+            if self.models.get("fast") and self.models["fast"] != self.models["chat"]:
+                parts.append(f"search {self.models['fast']}")
+            if self.models.get("embedding"):
+                parts.append(f"embeddings {self.models['embedding']}")
+            out += [f"_Models: {', '.join(parts)}_", ""]
         return "\n".join(out)

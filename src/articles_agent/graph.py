@@ -15,7 +15,7 @@ from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 
 from .citations import cite_labels, format_reference, locate_page, match_quote
-from .llm import get_chat
+from .llm import get_chat, models_used, structured
 from .results import CitedFinding, Result
 from .retriever import RRF_K, Hit, HybridRetriever
 from .config import current_project, settings, use_project
@@ -138,7 +138,7 @@ def rewrite(state: State) -> State:
     if prev := state.get("queries"):
         prompt += (f"\n\nThese queries found too little relevant material: {prev}. "
                    "Use broader or alternative terminology.")
-    llm = get_chat(fast=True).with_structured_output(Queries, method="json_schema", strict=True)
+    llm = structured(get_chat(fast=True), Queries, fast=True)
     queries = [state["question"]] + [q.strip() for q in llm.invoke(prompt).queries if q.strip()]
     return {"queries": list(dict.fromkeys(queries))[:6], "attempt": state.get("attempt", 0) + 1}
 
@@ -169,7 +169,7 @@ def grade(state: State) -> State:
     cands = state["candidates"]
     if not cands:
         return {"sources": []}
-    llm = get_chat(fast=True).with_structured_output(Relevant, method="json_schema", strict=True)
+    llm = structured(get_chat(fast=True), Relevant, fast=True)
     out = llm.invoke(GRADE_PROMPT.format(question=state["question"], max_sources=_cfg()["max_sources"],
                                          sources=_format_sources(cands, max_chars=1500)))
     picked = []
@@ -190,7 +190,7 @@ def generate(state: State) -> State:
     if not state["sources"]:
         return {"answer": Answer(summary="No passages in the library address this question.",
                                  findings=[])}
-    llm = get_chat().with_structured_output(Answer, method="json_schema", strict=True)
+    llm = structured(get_chat(), Answer)
     answer = llm.invoke([
         SystemMessage(ANSWER_SYSTEM),
         HumanMessage(f"Question: {state['question']}\n\nSources:\n\n{_format_sources(state['sources'])}"),
@@ -251,8 +251,11 @@ def cite(state: State) -> State:
                 for f, h, quote, exact, page in verified]
     refs = sorted(format_reference(p, labels[pid].rsplit(", ", 1)[-1])
                   for pid, p in cited_papers.items())
+    embeddings = sorted({get_retriever(slug).embedding.label for slug in state.get("projects") or []})
+    models = models_used() | ({"embedding": ", ".join(embeddings)} if embeddings else {})
     return {"result": Result(question=state["question"], summary=summary, findings=findings,
-                             references=refs, queries=state["queries"], dropped_quotes=dropped)}
+                             references=refs, queries=state["queries"], dropped_quotes=dropped,
+                             models=models)}
 
 
 @cache

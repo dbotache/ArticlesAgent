@@ -7,7 +7,8 @@ import numpy as np
 from rank_bm25 import BM25Okapi
 
 from .config import current_project, load_config
-from .llm import embedding_deployment, get_embeddings
+from .llm import get_embeddings
+from .projects import embedding_pin, embedding_spec
 from .store import embed_text, get_collection, load_chunks, load_papers
 
 TOKEN = re.compile(r"\w+", re.UNICODE)
@@ -43,8 +44,10 @@ class HybridRetriever:
         self.chunks = load_chunks(self.cfg)
         self.by_id = {c["chunk_id"]: i for i, c in enumerate(self.chunks)}
         self.bm25 = BM25Okapi([tokenize(embed_text(c, self.papers[c["paper_id"]])) for c in self.chunks])
-        self.collection = get_collection(self.cfg, embedding_deployment())
-        self.embeddings = get_embeddings()
+        self.embedding = embedding_spec()  # the model this project's index was built with
+        self.dimensions = (embedding_pin() or {}).get("dimensions")
+        self.collection = get_collection(self.cfg, self.embedding.identity)
+        self.embeddings = get_embeddings(self.embedding)
 
     def _allowed(self, paper_ids, year_from, year_to) -> np.ndarray | None:
         if not (paper_ids or year_from or year_to):
@@ -74,8 +77,13 @@ class HybridRetriever:
         k = k or self.cfg["retrieval"]["k"]
         n = candidates or self.cfg["retrieval"]["candidates"]
 
+        vector = self.embeddings.embed_query(query)
+        if self.dimensions and len(vector) != self.dimensions:
+            raise RuntimeError(f"The embedding model {self.embedding.label} returned {len(vector)} dimensions, "
+                               f"but this project's index has {self.dimensions}. Did the model behind "
+                               "the deployment change? Re-embed the project in its settings.")
         dense = self.collection.query(
-            query_embeddings=[self.embeddings.embed_query(query)], n_results=n,
+            query_embeddings=[vector], n_results=n,
             where=self._where(paper_ids, year_from, year_to), include=[])["ids"][0]
 
         scores = self.bm25.get_scores(tokenize(query))

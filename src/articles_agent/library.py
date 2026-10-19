@@ -138,16 +138,17 @@ def register_pdfs(paths: list[str | Path], use_crossref: bool = True, progress=N
     return results
 
 
-def update_database(progress=None) -> dict:
-    """Read all sources, parse + chunk new PDFs, then embed new chunks."""
+def update_database(progress=None, rebuild: bool = False) -> dict:
+    """Read all sources, parse + chunk new PDFs, then embed new chunks (rebuild: the whole index,
+    e.g. after changing the project's embedding model)."""
     from .index import run_index
     from .ingest import run_ingest
     ingest = run_ingest(progress=progress)
-    index = run_index(progress=progress)
+    index = run_index(progress=progress, rebuild=rebuild)
     return {"ingest": ingest, "index": index}
 
 
-def update_database_isolated(progress=None) -> dict:
+def update_database_isolated(progress=None, rebuild: bool = False) -> dict:
     """update_database() in a separate Python process, reporting progress back.
 
     Used by the Streamlit app: there, the PDF parser's worker processes would re-run the app
@@ -157,7 +158,8 @@ def update_database_isolated(progress=None) -> dict:
                         "ARTICLES_AGENT_HOME": str(APP_HOME), "ARTICLES_AGENT_PROJECT": current_project()}
     report = None
     with tempfile.TemporaryFile("w+", encoding="utf-8") as err:
-        proc = subprocess.Popen([sys.executable, "-m", "articles_agent.libraries", "sync", "--progress-json"],
+        cmd = [sys.executable, "-m", "articles_agent.libraries", "sync", "--progress-json"]
+        proc = subprocess.Popen(cmd + (["--rebuild"] if rebuild else []),
                                 cwd=APP_HOME, env=env, stdout=subprocess.PIPE, stderr=err, text=True)
         for line in proc.stdout:
             if not line.startswith("@@"):

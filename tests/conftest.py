@@ -127,12 +127,18 @@ def offline(monkeypatch):
 
 
 FAKE_ENV = {
-    "AZURE_OPENAI_ENDPOINT": "https://example.invalid/",
-    "AZURE_OPENAI_API_KEY": "test-key-SECRET-0123456789",
-    "AZURE_OPENAI_EMBEDDING_DEPLOYMENT": "fake-embed",
-    "AZURE_OPENAI_CHAT_DEPLOYMENT": "fake-chat",
-    "AZURE_OPENAI_FAST_DEPLOYMENT": "fake-chat",
+    "CHAT_PROVIDER": "openai",
+    "CHAT_MODEL": "fake-chat",
+    "EMBEDDING_PROVIDER": "openai",
+    "EMBEDDING_MODEL": "fake-embed",
+    "OPENAI_API_KEY": "test-key-SECRET-0123456789",
 }
+# every setting the app reads; tests start from none of them being set
+SETTING_KEYS = ("CHAT_PROVIDER", "CHAT_MODEL", "FAST_PROVIDER", "FAST_MODEL", "EMBEDDING_PROVIDER",
+                "EMBEDDING_MODEL", "AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_KEY",
+                "AZURE_OPENAI_CHAT_DEPLOYMENT", "AZURE_OPENAI_FAST_DEPLOYMENT",
+                "AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+                "COMPATIBLE_BASE_URL", "COMPATIBLE_API_KEY", "STRUCTURED_OUTPUT_METHOD")
 
 
 PROJECT = "test"
@@ -150,9 +156,12 @@ def patch_home(mp: pytest.MonkeyPatch, root: Path, chat: FakeChat, embeddings: F
     mp.setattr(library, "APP_HOME", root)
     mp.setattr(pdfmeta, "_caches", {})
     mp.delenv("ARTICLES_AGENT_PROJECT", raising=False)
+    for k in SETTING_KEYS:
+        mp.delenv(k, raising=False)
     for k, v in FAKE_ENV.items():
         mp.setenv(k, v)
-    def get_embeddings():
+
+    def get_embeddings(spec=None):
         return embeddings
 
     def get_chat(fast=False):

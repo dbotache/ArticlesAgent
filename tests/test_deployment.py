@@ -18,7 +18,7 @@ import urllib.request
 import pytest
 from streamlit.testing.v1 import AppTest
 
-from conftest import CODE_ROOT, FAKE_ENV
+from conftest import CODE_ROOT, FAKE_ENV, SETTING_KEYS
 
 APP = str(CODE_ROOT / "app.py")
 PYTHON = sys.executable
@@ -27,7 +27,7 @@ SRC_FILES = sorted((CODE_ROOT / "src" / "articles_agent").glob("*.py")) + [CODE_
 
 def child_env(home, **extra) -> dict:
     """Environment of a fresh process: no Azure settings unless given, data in `home`."""
-    env = {k: v for k, v in os.environ.items() if not k.startswith("AZURE_OPENAI_")}
+    env = {k: v for k, v in os.environ.items() if k not in SETTING_KEYS}
     return env | {"ARTICLES_AGENT_HOME": str(home)} | extra
 
 
@@ -96,10 +96,12 @@ def test_configuration_through_environment_only(tmp_path):
     home = tmp_path / "home"
     home.mkdir()
     code = "from articles_agent.llm import missing_settings; print(missing_settings())"
-    assert run_python(code, child_env(home)) == str(["AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_KEY",
-                                                     "AZURE_OPENAI_EMBEDDING_DEPLOYMENT",
-                                                     "AZURE_OPENAI_CHAT_DEPLOYMENT"])
+    assert run_python(code, child_env(home)) != "[]"  # nothing configured
     assert run_python(code, child_env(home, **FAKE_ENV)) == "[]"
+    anthropic = {"CHAT_PROVIDER": "anthropic", "CHAT_MODEL": "claude-opus-5-5", "ANTHROPIC_API_KEY": "k",
+                 "EMBEDDING_PROVIDER": "compatible", "EMBEDDING_MODEL": "nomic-embed-text",
+                 "COMPATIBLE_BASE_URL": "http://localhost:11434/v1"}
+    assert run_python(code, child_env(home, **anthropic)) == "[]"
 
 
 def all_text(at: AppTest) -> str:
@@ -120,7 +122,7 @@ def test_api_key_is_never_sent_to_the_browser(page, request, workspace):
     for exp in at.expander:  # open every section, including the Azure settings
         exp.proto.expanded = True
     assert not at.exception
-    assert FAKE_ENV["AZURE_OPENAI_API_KEY"] not in all_text(at)
+    assert FAKE_ENV["OPENAI_API_KEY"] not in all_text(at)
 
 
 def test_dependencies_are_declared():
@@ -128,7 +130,8 @@ def test_dependencies_are_declared():
     declared = {re.split(r"[<>=!\[ ]", d)[0].lower()
                 for d in tomllib.loads((CODE_ROOT / "pyproject.toml").read_text())["project"]["dependencies"]}
     dist = {"yaml": "pyyaml", "dotenv": "python-dotenv", "rank_bm25": "rank-bm25",
-            "langchain_openai": "langchain-openai", "langchain_core": "langchain-core"}
+            "langchain_openai": "langchain-openai", "langchain_core": "langchain-core",
+            "langchain_anthropic": "langchain-anthropic"}
     missing = set()
     for f in SRC_FILES:
         for node in ast.walk(ast.parse(f.read_text())):
