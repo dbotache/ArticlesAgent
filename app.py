@@ -3,12 +3,15 @@
     .venv/bin/streamlit run app.py
 """
 
+import subprocess
 from pathlib import Path
 
 import streamlit as st
 
 from articles_agent.graph import ask_stream, get_retriever
+from articles_agent.library import collect_pdfs, register_pdfs, save_upload, update_database
 from articles_agent.results import Result
+from articles_agent.store import ZOTERO_KEY
 
 st.set_page_config(page_title="ArticlesAgent", page_icon="📚", layout="wide")
 
@@ -26,6 +29,48 @@ def md_safe(text: str) -> str:
 def zotero_url(pdf_path: str, page: int) -> str:
     # the Zotero storage folder name is the attachment key
     return f"zotero://open-pdf/library/items/{Path(pdf_path).parent.name}?page={page}"
+
+
+def run_update(uploads, folder: str, use_crossref: bool):
+    """Register uploaded files / a folder's PDFs, then parse, chunk and embed what is new."""
+    log = []
+    with st.status("Updating the library…", expanded=True) as status:
+        try:
+            paths = [save_upload(f.name, f.getvalue()) for f in uploads]
+            if folder.strip():
+                found = collect_pdfs(folder.strip())
+                status.write(f"{len(found)} PDFs found in {folder.strip()}")
+                paths += found
+            bar = st.progress(0.0)
+            labels = {"register": "Reading metadata", "parse": "Parsing PDFs",
+                      "embed": "Embedding passages"}
+
+            def progress(stage, done, total):
+                bar.progress(done / max(total, 1), text=f"{labels[stage]}: {done}/{total}")
+
+            added = []
+            if paths:
+                results = register_pdfs(paths, use_crossref=use_crossref, progress=progress)
+                icons = {"added": "✅", "skipped": "⏭️", "error": "❌"}
+                log += [f"{icons[x['status']]} **{x['file']}**: {x['detail']}" for x in results]
+                added = [x for x in results if x["status"] == "added"]
+            if added or not paths:  # no paths = Zotero re-sync
+                status.write("Parsing new PDFs and embedding new passages…")
+                report = update_database(progress=progress)
+                per_paper = report["ingest"]["chunks_per_paper"]
+                log += [f"⚠️ **{x['file']}**: no text extracted (scanned PDF?)"
+                        for x in added if not per_paper.get(x["paper_id"])]
+                log.append(f"Indexed {report['index']['embedded']:,} new passages; "
+                           f"the index now holds {report['index']['total']:,}.")
+            status.update(label="Library updated", state="complete")
+        except Exception as exc:
+            status.update(label="Update failed", state="error")
+            log.append(f"❌ {type(exc).__name__}: {exc}")
+    retriever.clear()
+    get_retriever.cache_clear()
+    st.session_state.update_log = log
+    st.session_state.upload_key += 1  # empties the file uploader
+    st.rerun()
 
 
 r = retriever()
@@ -50,6 +95,33 @@ with st.sidebar:
     selected = st.multiselect(
         "Restrict to papers", indexed, placeholder="All papers",
         format_func=lambda pid: f"{papers[pid]['short_cite']} — {papers[pid]['title'][:70]}")
+
+    st.divider()
+    st.session_state.setdefault("upload_key", 0)
+    with st.expander("➕ Add papers", expanded=bool(st.session_state.get("update_log"))):
+        uploads = st.file_uploader("PDF files", type="pdf", accept_multiple_files=True,
+                                   key=f"upload_{st.session_state.upload_key}")
+        folder = st.text_input("…and/or a folder (searched recursively)",
+                               placeholder="/home/diego/Papers/new")
+        crossref = st.checkbox("Look up citation data via DOI (Crossref)", value=True,
+                               help="Only the DOI printed in the PDF is sent to api.crossref.org.")
+        add_clicked = st.button("Add to library", type="primary", use_container_width=True,
+                                disabled=not (uploads or folder.strip()))
+        sync_clicked = st.button(
+            "🔄 Re-sync Zotero library", use_container_width=True,
+            help="Re-read My_Library.bib and index PDFs added in Zotero since the last run. "
+                 "Export the .bib from Zotero first.")
+        st.caption("Parsing takes a few seconds per PDF, embedding about 1 minute per "
+                   "10 papers. Keep this tab open until it is done.")
+        if add_clicked:
+            run_update(uploads, folder, crossref)
+        elif sync_clicked:
+            run_update([], "", crossref)
+        if log := st.session_state.get("update_log"):
+            st.markdown("\n\n".join(log))
+            if st.button("Dismiss", key="dismiss_log"):
+                del st.session_state.update_log
+                st.rerun()
 
     st.divider()
     if history:
@@ -80,7 +152,11 @@ def render_result(res: Result, idx: int):
                 chunk = chunk_by_id.get(f.chunk_id)
                 if chunk:
                     left, right = st.columns([1, 4])
-                    left.link_button("Open in Zotero", zotero_url(chunk["pdf_path"], f.page))
+                    if ZOTERO_KEY.match(Path(chunk["pdf_path"]).parent.name):
+                        left.link_button("Open in Zotero", zotero_url(chunk["pdf_path"], f.page))
+                    elif left.button("Open PDF", key=f"open_{idx}_{i}",
+                                     help=f"Opens the file in your PDF viewer (go to page {f.page})"):
+                        subprocess.Popen(["xdg-open", chunk["pdf_path"]])  # app runs locally
                     with right.expander("Show surrounding passage"):
                         st.markdown(md_safe(chunk["text"]))
 

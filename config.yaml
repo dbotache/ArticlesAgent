@@ -1,5 +1,5 @@
 library:
-  bib_file: "My Library.bib"
+  bib_file: "My_Library.bib"
   storage_dir: /home/diego/Zotero/storage
 
 # Generated artefacts (parsed page cache, chunks, metadata, later the vector index)

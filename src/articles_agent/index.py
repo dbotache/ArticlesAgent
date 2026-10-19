@@ -30,10 +30,16 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rebuild", action="store_true", help="delete and rebuild the index")
     args = ap.parse_args()
+    report = run_index(rebuild=args.rebuild)
+    print(f"{report['searchable']} searchable chunks, {report['embedded']} newly embedded "
+          f"with {report['model']}; index now holds {report['total']} chunks")
 
+
+def run_index(rebuild: bool = False, progress=None) -> dict:
+    """Embed all searchable chunks not yet in the index. progress(stage, done, total) is optional."""
     cfg = load_config()
     model = embedding_deployment()
-    if args.rebuild:
+    if rebuild:
         client = chromadb.PersistentClient(path=str(cfg["data_dir"] / "chroma"))
         if COLLECTION in [c.name for c in client.list_collections()]:
             client.delete_collection(COLLECTION)
@@ -48,12 +54,11 @@ def main():
     if stale := list(existing - wanted):  # chunks that disappeared after re-ingestion
         col.delete(ids=stale)
     todo = [c for c in chunks if c["chunk_id"] not in existing]
-    print(f"{len(chunks)} searchable chunks, {len(existing & wanted)} already indexed, "
-          f"{len(todo)} to embed with {model}")
 
     embeddings = get_embeddings()
     batch = cfg["index"]["batch_size"]
-    for i in tqdm(range(0, len(todo), batch), desc="Embedding", unit="batch"):
+    starts = range(0, len(todo), batch)
+    for n, i in enumerate(tqdm(starts, desc="Embedding", unit="batch", disable=progress is not None), 1):
         part = todo[i:i + batch]
         texts = [embed_text(c, papers[c["paper_id"]]) for c in part]
         col.add(
@@ -62,7 +67,10 @@ def main():
             documents=[c["text"] for c in part],
             metadatas=[_metadata(c, papers[c["paper_id"]]) for c in part],
         )
-    print(f"index now holds {col.count()} chunks")
+        if progress:
+            progress("embed", n, len(starts))
+    return {"searchable": len(chunks), "embedded": len(todo), "removed": len(stale),
+            "total": col.count(), "model": model}
 
 
 if __name__ == "__main__":

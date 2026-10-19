@@ -77,8 +77,12 @@ def load_bib(bib_file: str) -> dict[str, Paper]:
 
 
 def build_library(bib_file: str, storage_dir: str) -> dict[str, Paper]:
-    """All bib entries, plus PDFs in Zotero storage that no bib entry links to."""
+    """All bib entries, imported papers (library/extra_papers.json), and PDFs in Zotero storage
+    that no bib entry links to."""
+    from .library import registry_papers  # library imports this module
+
     papers = load_bib(bib_file)
+    papers |= {pid: p for pid, p in registry_papers().items() if pid not in papers}
     linked = {p for paper in papers.values() for p in paper.pdf_paths}
     for pdf in sorted(Path(storage_dir).glob("*/*.pdf")):
         if str(pdf) in linked:

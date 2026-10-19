@@ -1,5 +1,6 @@
 """Shared access to ingested papers/chunks and the Chroma collection."""
 
+import hashlib
 import json
 import re
 from functools import cache
@@ -37,9 +38,18 @@ def load_chunks(cfg: dict) -> list[dict]:
     return chunks
 
 
+ZOTERO_KEY = re.compile(r"^[A-Z0-9]{8}$")
+
+
 def parsed_cache_file(data_dir: Path, pdf: str) -> Path:
-    # Zotero storage key (parent folder) is unique per attachment
-    return data_dir / "parsed" / f"{Path(pdf).parent.name}.json"
+    p = Path(pdf)
+    # a Zotero storage key (parent folder) is unique per attachment; other PDFs may share
+    # a folder, so they are keyed by a hash of their path
+    if ZOTERO_KEY.match(p.parent.name):
+        name = p.parent.name
+    else:
+        name = "x_" + hashlib.sha1(str(p).encode()).hexdigest()[:16]
+    return data_dir / "parsed" / f"{name}.json"
 
 
 @cache

@@ -38,7 +38,7 @@ The system has an **offline part** (run once, then again whenever the library ch
 flowchart TD
     subgraph OFFLINE["Offline: build the knowledge base"]
         Z[("Zotero storage<br/>~/Zotero/storage/*/*.pdf")]
-        B[("My Library.bib<br/>BibLaTeX export")]
+        B[("My_Library.bib<br/>BibLaTeX export")]
         Z --> P["parse.py<br/>PDF → Markdown per page<br/>(pymupdf4llm)"]
         B --> M["metadata.py<br/>citation key, authors, year,<br/>venue, DOI, PDF paths"]
         P --> C["chunking.py<br/>section-aware chunks<br/>with page ranges"]
@@ -77,7 +77,7 @@ flowchart TD
 ### Requirements
 
 - Python 3.11–3.13 (the project venv uses 3.12) and [uv](https://docs.astral.sh/uv/)
-- A Zotero library with PDFs, plus a **BibLaTeX export** of it (`My Library.bib`, exported with the
+- A Zotero library with PDFs, plus a **BibLaTeX export** of it (`My_Library.bib`, exported with the
   *Export Files* option off; the `file` field with the PDF paths must be present)
 - An Azure OpenAI resource with three deployments (a single chat deployment can serve both roles):
 
@@ -343,6 +343,7 @@ flowchart LR
 - **Sidebar filters:** publication-year range (papers without a year are excluded while it is set)
   and a restriction to selected papers.
 - **Export:** each answer, or the whole session, as Markdown.
+- **Add papers:** upload PDFs or import a folder, and re-sync the Zotero library (see §11).
 - Each question is answered independently; follow-up questions don't see earlier answers.
 
 `--server.address localhost` keeps the app private to this machine. Without it, Streamlit listens
@@ -429,7 +430,7 @@ All settings live in `config.yaml`; secrets and deployment names live in `.env`.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `library.bib_file` | `My Library.bib` | BibLaTeX export (relative to the project) |
+| `library.bib_file` | `My_Library.bib` | BibLaTeX export (relative to the project) |
 | `library.storage_dir` | `/home/diego/Zotero/storage` | Zotero attachment folder |
 | `data_dir` | `data` | generated files |
 | `ingest.workers` | 4 | parallel PDF parser processes |
@@ -461,7 +462,7 @@ ArticlesAgent/
 ├── pyproject.toml          dependencies
 ├── config.yaml             settings (see §10)
 ├── .env / .env.example     Azure endpoint, key, deployment names
-├── My Library.bib          Zotero BibLaTeX export
+├── My_Library.bib          Zotero BibLaTeX export
 ├── eval/
 │   └── questions.yaml      retrieval benchmark
 ├── src/articles_agent/
@@ -480,8 +481,13 @@ ArticlesAgent/
 │   ├── graph.py            LangGraph answer pipeline
 │   ├── citations.py        quote verification, page location, APA references
 │   ├── results.py          Result / CitedFinding + Markdown rendering
-│   └── ask.py              CLI: ask a question
+│   ├── ask.py              CLI: ask a question
+│   ├── library.py          import non-Zotero PDFs: metadata, duplicates, registry
+│   └── add.py              CLI: add PDF files / folders
 ├── app.py                  Streamlit chat UI
+├── library/                imported papers, git-ignored
+│   ├── extra_papers.json   metadata registry for non-Zotero PDFs
+│   └── uploads/            PDFs uploaded through the UI
 └── data/                   generated, git-ignored
     ├── parsed/             per-PDF page cache (<storage-key>.json)
     ├── chunks.jsonl        all chunks
@@ -492,11 +498,40 @@ ArticlesAgent/
 
 ### Updating the library
 
-After adding papers to Zotero:
+**Papers added in Zotero:**
 
-1. Export the library again as BibLaTeX to `My Library.bib`.
-2. `python -m articles_agent.ingest`: parses only the new PDFs.
-3. `python -m articles_agent.index`: embeds only the new chunks.
+1. Export the library again as BibLaTeX to `My_Library.bib`.
+2. Click **🔄 Re-sync Zotero library** in the UI (sidebar → *Add papers*), or run
+   `python -m articles_agent.ingest && python -m articles_agent.index`.
+
+Only new or changed PDFs are parsed, and only new chunks are embedded. Zotero PDFs that aren't in the `.bib` yet
+are indexed with their file name as the title, until the next export gives them proper metadata.
+
+**PDFs from outside Zotero** (single files or whole folders):
+
+- UI: sidebar → **➕ Add papers** → upload PDF files and/or enter a folder path (searched
+  recursively) → **Add to library**.
+- CLI: `python -m articles_agent.add paper.pdf ~/Papers/new_batch [--no-crossref]`
+
+What happens (`library.py`):
+
+1. **Duplicates are skipped**: same file path, same file content (SHA-256), a DOI that is already in
+   the library, or a title that is ≥ 95 % identical to an existing one.
+2. **Citation metadata:** the DOI printed on the first two pages is looked up at **Crossref** (only the
+   DOI is sent). The result is accepted only if Crossref's title also appears in the PDF text. Fallbacks,
+   in order: the PDF's embedded title/author properties, the largest-font text on page 1, the file name.
+   These fallbacks give no year or venue (cited as *n.d.*).
+3. The paper is recorded in `library/extra_papers.json`, with a citation key such as
+   `lastname_firstword_year`. Uploaded files are copied to `library/uploads/`, while folder PDFs are used
+   in place (so don't move them afterwards).
+4. Ingestion and indexing then run incrementally, and the UI reloads the index.
+
+To correct the metadata of an imported paper, edit its entry in `library/extra_papers.json` and run
+`python -m articles_agent.ingest && python -m articles_agent.index`. To remove an imported paper,
+delete its entry and run the same commands; its chunks are then removed from the index.
+
+In answers, imported papers get an **Open PDF** button, which opens the file in the default viewer
+without jumping to the page, instead of *Open in Zotero*.
 
 ---
 

@@ -1,4 +1,6 @@
-"""Parse every PDF of the Zotero library into cited, page-aware chunks.
+"""Parse every PDF of the library into cited, page-aware chunks.
+
+The library is the Zotero .bib export plus papers imported via `articles_agent.add` / the UI.
 
     python -m articles_agent.ingest            # incremental (re-uses parsed cache)
     python -m articles_agent.ingest --limit 5  # quick trial run
@@ -6,7 +8,9 @@
 
 import argparse
 import json
+import multiprocessing
 import os
+from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
@@ -19,10 +23,6 @@ from .parse import parse_pdf
 from .store import parsed_cache_file
 
 
-def _cache_file(cache_dir: Path, pdf: str) -> Path:
-    return parsed_cache_file(cache_dir.parent, pdf)
-
-
 def _parse_to_cache(pdf: str, cache: Path) -> tuple[str, str | None]:
     os.environ.setdefault("OMP_NUM_THREADS", "2")
     try:
@@ -33,39 +33,44 @@ def _parse_to_cache(pdf: str, cache: Path) -> tuple[str, str | None]:
     return pdf, None
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--limit", type=int, help="only process the first N PDFs")
-    ap.add_argument("--reparse", action="store_true", help="ignore the parsed-page cache")
-    args = ap.parse_args()
-
+def run_ingest(reparse: bool = False, limit: int | None = None, progress=None) -> dict:
+    """Parse new/changed PDFs, re-chunk everything. progress(stage, done, total) is optional."""
     cfg = load_config()
     data_dir: Path = cfg["data_dir"]
-    cache_dir = data_dir / "parsed"
-    cache_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "parsed").mkdir(parents=True, exist_ok=True)
 
     papers = build_library(cfg["library"]["bib_file"], cfg["library"]["storage_dir"])
     jobs = [(pid, pdf) for pid, p in papers.items() for pdf in p.pdf_paths if Path(pdf).exists()]
-    if args.limit:
-        jobs = jobs[: args.limit]
+    if limit:
+        jobs = jobs[:limit]
 
-    todo = [pdf for _, pdf in jobs
-            if args.reparse or not _cache_file(cache_dir, pdf).exists()
-            or _cache_file(cache_dir, pdf).stat().st_mtime < Path(pdf).stat().st_mtime]
+    def stale(pdf: str) -> bool:
+        cache = parsed_cache_file(data_dir, pdf)
+        return reparse or not cache.exists() or cache.stat().st_mtime < Path(pdf).stat().st_mtime
+
+    todo = [pdf for _, pdf in jobs if stale(pdf)]
     errors = {}
     if todo:
-        with ProcessPoolExecutor(max_workers=cfg["ingest"]["workers"]) as pool:
-            futures = [pool.submit(_parse_to_cache, pdf, _cache_file(cache_dir, pdf)) for pdf in todo]
-            for fut in tqdm(as_completed(futures), total=len(futures), desc="Parsing PDFs"):
+        # spawn: safe to start from threaded hosts such as the Streamlit app
+        ctx = multiprocessing.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=min(cfg["ingest"]["workers"], len(todo)),
+                                 mp_context=ctx) as pool:
+            futures = [pool.submit(_parse_to_cache, pdf, parsed_cache_file(data_dir, pdf))
+                       for pdf in todo]
+            done = tqdm(as_completed(futures), total=len(futures), desc="Parsing PDFs",
+                        disable=progress is not None)
+            for n, fut in enumerate(done, 1):
                 pdf, err = fut.result()
                 if err:
                     errors[pdf] = err
+                if progress:
+                    progress("parse", n, len(todo))
 
     ccfg = cfg["chunking"]
     all_chunks, empty_pages = [], {}
     pdf_count = {}
     for pid, pdf in jobs:
-        cache = _cache_file(cache_dir, pdf)
+        cache = parsed_cache_file(data_dir, pdf)
         if not cache.exists():
             continue
         pages = json.loads(cache.read_text(encoding="utf-8"))["pages"]
@@ -88,17 +93,29 @@ def main():
         encoding="utf-8")
     report = {
         "pdfs": len(jobs),
+        "parsed": len(todo),
         "chunks": len(all_chunks),
         "reference_chunks": sum(c.is_references for c in all_chunks),
         "parse_errors": errors,
         "pdfs_with_blank_pages": {k: len(v) for k, v in empty_pages.items()},
+        "chunks_per_paper": dict(Counter(c.paper_id for c in all_chunks)),
     }
     (data_dir / "ingest_report.json").write_text(json.dumps(report, indent=1, ensure_ascii=False))
+    return report
 
-    print(f"{report['pdfs']} PDFs -> {report['chunks']} chunks "
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--limit", type=int, help="only process the first N PDFs")
+    ap.add_argument("--reparse", action="store_true", help="ignore the parsed-page cache")
+    args = ap.parse_args()
+
+    report = run_ingest(reparse=args.reparse, limit=args.limit)
+    print(f"{report['pdfs']} PDFs ({report['parsed']} parsed now) -> {report['chunks']} chunks "
           f"({report['reference_chunks']} reference-list chunks)")
-    print(f"parse errors: {len(errors)}, PDFs with blank (scanned?) pages: {len(empty_pages)}")
-    print(f"written to {data_dir}")
+    print(f"parse errors: {len(report['parse_errors'])}, "
+          f"PDFs with blank (scanned?) pages: {len(report['pdfs_with_blank_pages'])}")
+    print(f"written to {load_config()['data_dir']}")
 
 
 if __name__ == "__main__":
