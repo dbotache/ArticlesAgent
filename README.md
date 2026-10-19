@@ -328,6 +328,27 @@ flowchart LR
 
 ## 8. Usage
 
+### Chat UI (Streamlit)
+
+```bash
+.venv/bin/streamlit run app.py --server.address localhost   # → http://localhost:8501
+```
+
+- **Chat:** questions in English or German; while the pipeline runs, a status box shows the
+  generated queries and how many passages were found and selected.
+- **Findings** appear as cards with the verbatim quote, the citation and the section, plus:
+  - **Open in Zotero**: opens the PDF in Zotero at the quoted page
+    (`zotero://open-pdf/library/items/<attachment-key>?page=N`; Zotero must be installed and running);
+  - **Show surrounding passage**: the full chunk the quote comes from.
+- **Sidebar filters:** publication-year range (papers without a year are excluded while it is set)
+  and a restriction to selected papers.
+- **Export:** each answer, or the whole session, as Markdown.
+- Each question is answered independently; follow-up questions don't see earlier answers.
+
+`--server.address localhost` keeps the app private to this machine. Without it, Streamlit listens
+on all network interfaces, and anyone on the same network could use the app and therefore your
+Azure quota.
+
 ### Command line
 
 ```bash
@@ -460,6 +481,7 @@ ArticlesAgent/
 │   ├── citations.py        quote verification, page location, APA references
 │   ├── results.py          Result / CitedFinding + Markdown rendering
 │   └── ask.py              CLI: ask a question
+├── app.py                  Streamlit chat UI
 └── data/                   generated, git-ignored
     ├── parsed/             per-PDF page cache (<storage-key>.json)
     ├── chunks.jsonl        all chunks
@@ -499,6 +521,6 @@ After adding papers to Zotero:
 - [x] Ingestion: parsing, metadata, chunking
 - [x] Hybrid index and retrieval, retrieval benchmark
 - [x] LangGraph answer pipeline with verified, page-accurate citations
-- [ ] Streamlit chat UI: chat history, expandable sources, year/paper filters, Markdown export
+- [x] Streamlit chat UI: chat history, expandable sources, year/paper filters, Markdown export
 - [ ] Batch topic reports: `topics.yaml` → one cited Markdown/DOCX report per topic
 - [ ] Extend `eval/questions.yaml` to 10–20 questions; optionally add a cross-encoder reranker

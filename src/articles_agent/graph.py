@@ -91,12 +91,12 @@ class State(TypedDict, total=False):
 
 
 @cache
-def _retriever() -> HybridRetriever:
+def get_retriever() -> HybridRetriever:
     return HybridRetriever()
 
 
 def _cfg() -> dict:
-    return _retriever().cfg["answer"]
+    return get_retriever().cfg["answer"]
 
 
 def _format_sources(hits: list[Hit], max_chars: int | None = None) -> str:
@@ -122,7 +122,7 @@ def retrieve(state: State) -> State:
     """Search with every query and fuse the ranked lists (reciprocal rank fusion)."""
     cfg, fused, scores = _cfg(), {}, {}
     for q in state["queries"]:
-        hits = _retriever().search(q, k=cfg["per_query_k"], paper_ids=state.get("paper_ids"),
+        hits = get_retriever().search(q, k=cfg["per_query_k"], paper_ids=state.get("paper_ids"),
                                    year_from=state.get("year_from"), year_to=state.get("year_to"))
         for rank, h in enumerate(hits, 1):
             cid = h.chunk["chunk_id"]
@@ -168,7 +168,7 @@ def generate(state: State) -> State:
 def cite(state: State) -> State:
     """Verify every quote against the source chunk, find its page, build references."""
     sources, answer = state["sources"], state["answer"]
-    data_dir = _retriever().cfg["data_dir"]
+    data_dir = get_retriever().cfg["data_dir"]
     threshold = _cfg()["fuzzy_threshold"]
 
     def source(sid: str) -> Hit | None:
@@ -243,3 +243,11 @@ def ask(question: str, paper_ids: list[str] | None = None,
                                 "year_from": year_from, "year_to": year_to})
     return state["result"]
 
+
+
+def ask_stream(question: str, paper_ids: list[str] | None = None,
+               year_from: int | None = None, year_to: int | None = None):
+    """Yield (node_name, state_update) while the graph runs; the 'cite' update holds the Result."""
+    inputs = {"question": question, "paper_ids": paper_ids, "year_from": year_from, "year_to": year_to}
+    for update in get_graph().stream(inputs, stream_mode="updates"):
+        yield from update.items()
