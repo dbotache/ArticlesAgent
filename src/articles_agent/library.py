@@ -143,7 +143,8 @@ def update_database_isolated(progress=None) -> dict:
     Used by the Streamlit app: there, the PDF parser's worker processes would re-run the app
     script (Streamlit's __main__) instead of starting cleanly."""
     src_dir = str(Path(__file__).resolve().parents[1])
-    env = os.environ | {"PYTHONPATH": os.pathsep.join(filter(None, [src_dir, os.environ.get("PYTHONPATH")]))}
+    env = os.environ | {"PYTHONPATH": os.pathsep.join(filter(None, [src_dir, os.environ.get("PYTHONPATH")])),
+                        "ARTICLES_AGENT_HOME": str(PROJECT_ROOT)}
     report = None
     with tempfile.TemporaryFile("w+", encoding="utf-8") as err:
         proc = subprocess.Popen([sys.executable, "-m", "articles_agent.libraries", "sync", "--progress-json"],

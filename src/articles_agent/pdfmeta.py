@@ -51,11 +51,12 @@ def save_caches() -> None:
 
 def _title_from_layout(page) -> str:
     """The largest-font text in the upper half of the first page is usually the title."""
-    spans = [s for b in page.get_text("dict")["blocks"] for line in b.get("lines", [])
-             for s in line["spans"] if s["text"].strip() and s["bbox"][1] < page.rect.height / 2]
-    if not spans:
-        return ""
-    spans = [s for s in spans if not ARXIV_RE.match(s["text"].strip())]  # rotated margin stamp
+    def text(block):
+        return " ".join(s["text"] for line in block.get("lines", []) for s in line["spans"]).strip()
+    # drop arXiv's margin stamp (may be split into several spans or lines)
+    blocks = [b for b in page.get_text("dict")["blocks"] if not ARXIV_RE.match(text(b))]
+    spans = [s for b in blocks for line in b.get("lines", []) for s in line["spans"]
+             if s["text"].strip() and s["bbox"][1] < page.rect.height / 2]
     if not spans:
         return ""
     biggest = max(s["size"] for s in spans)

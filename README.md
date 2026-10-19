@@ -23,7 +23,7 @@ Built with LangChain, LangGraph, Chroma and Azure OpenAI.
 6. [Stage 4 – Answer graph (LangGraph)](#6-stage-4--answer-graph-langgraph)
 7. [Quote verification and citations](#7-quote-verification-and-citations)
 8. [Usage](#8-usage)
-9. [Evaluation](#9-evaluation)
+9. [Evaluation and tests](#9-evaluation-and-tests)
 10. [Configuration reference](#10-configuration-reference)
 11. [Project layout and data files](#11-project-layout-and-data-files)
 12. [Limitations and roadmap](#12-limitations-and-roadmap)
@@ -445,7 +445,7 @@ search `queries` and `dropped_quotes`.
 
 ---
 
-## 9. Evaluation
+## 9. Evaluation and tests
 
 Retrieval quality is measured against questions whose answers you already know, in `eval/questions.yaml`:
 
@@ -466,6 +466,53 @@ chunking, embeddings or retrieval settings, to see whether the change actually h
 
 Note: `eval_retrieval` tests the **plain hybrid search** (stage 3) with the question as the only query.
 The full graph adds query rewriting, which, for example, makes German questions find English papers.
+
+### Automated tests
+
+```bash
+uv pip install --python .venv/bin/python -e ".[test]"
+.venv/bin/python -m pytest                       # ~25 s, offline, no Azure costs
+.venv/bin/python -m pytest -m "not integration"  # without subprocess / server tests
+ARTICLES_AGENT_LIVE_TESTS=1 .venv/bin/python -m pytest -m live   # real Azure deployments (a few cents)
+```
+
+Every test runs in a **temporary installation**: its own `library/`, `data/` and `.env`, three generated
+sample papers (English, German, and one without a reference entry), **fake models** in place of Azure
+(`tests/fakes.py`: hashing embeddings, a scripted chat model that also returns one invented quote), and
+the network blocked. Your real library, index and `.env` are never touched.
+
+| File | What it checks |
+|---|---|
+| `test_metadata.py` | BibTeX/BibLaTeX and RIS readers, `file` fields of Zotero/JabRef/Mendeley (Linux and Windows), encodings, citation keys, DOIs |
+| `test_chunking.py` | sections, page ranges across page breaks, reference lists, chunk size/overlap, umlaut repair |
+| `test_citations.py` | quote verification (exact, near-verbatim snapping, rejection), page location, APA references, labels, Markdown output |
+| `test_pdfmeta.py` | DOI/title/text probing and its cache, Crossref and arXiv lookups (mocked), rejection of a cited paper's DOI, fallbacks |
+| `test_sources.py` | every reference manager's PDF linking/matching, preview, adding/removing libraries, de-duplication across libraries |
+| `test_library.py` | single-PDF import with duplicate detection, upload path safety, the database update in a separate process |
+| `test_pipeline.py` | ingestion → index → hybrid search with filters → LangGraph answer: invented quote dropped, pages and references correct, retry loop, incremental re-runs |
+| `test_settings_jobs.py` | saving `.env` (file mode 600), connection check, background job runner |
+| `test_app.py` | the Streamlit UI headless (AppTest): setup page for a new user → build → chat, answers, filters, errors, adding/removing papers and libraries |
+| `test_deployment.py` | **web hosting**: server health endpoint, data home separate from code (`ARTICLES_AGENT_HOME`), configuration via environment variables only, API key never sent to the browser, dependencies declared, no personal paths, `.gitignore` |
+| `test_live_azure.py` | opt-in: every deployment responds, and the real model follows the citation contract |
+
+**Public hosting checklist.** `test_deployment.py` also contains tests marked
+`xfail(strict=True)` for what is still missing before the app can face anonymous visitors on a website:
+
+1. visitors can enter server file/folder paths (library export, PDF folder);
+2. visitors can change the Azure settings and manage libraries (needs an admin-only area);
+3. there is no login (anyone with the URL spends your Azure quota);
+4. *Open PDF* runs `xdg-open` on the server instead of sending the PDF to the browser;
+5. the upload size isn't limited (`.streamlit/config.toml`).
+
+They show up as `xfailed`. Once one of them is fixed, pytest reports `XPASS(strict)` as a failure:
+remove that test's marker, and from then on the check is enforced.
+
+### Deployment notes
+
+- `ARTICLES_AGENT_HOME=/srv/articles-agent` keeps `.env`, `library/` and `data/` outside the code
+  folder (e.g. on a persistent volume). Without its own `config.yaml`, the shipped one is used.
+- Azure settings can come from environment variables alone; a `.env` file is optional.
+- Health check for a proxy or orchestrator: `GET /_stcore/health` → `ok`.
 
 ---
 
@@ -508,6 +555,7 @@ ArticlesAgent/
 ├── .env / .env.example     Azure endpoint, key, deployment names
 ├── eval/
 │   └── questions.yaml      retrieval benchmark
+├── tests/                  pytest suite (see §9), fixtures in conftest.py, fake models in fakes.py
 ├── src/articles_agent/
 │   ├── config.py           loads config.yaml, resolves paths
 │   ├── metadata.py         BibTeX / RIS readers → Paper records

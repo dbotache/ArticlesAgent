@@ -106,7 +106,8 @@ def render_job(on_finished) -> bool:
 
 def render_connection():
     st.caption("Stored in the project's `.env` file on this computer.")
-    with st.form("azure_settings"):
+    # cleared after submit, so the key doesn't stay in the browser's form field
+    with st.form("azure_settings", clear_on_submit=True):
         values = {}
         for key, label in SETTINGS.items():
             current = os.environ.get(key, "")

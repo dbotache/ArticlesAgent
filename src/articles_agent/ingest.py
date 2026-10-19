@@ -11,8 +11,11 @@ import argparse
 import json
 import multiprocessing
 import os
+import sys
+import types
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from contextlib import contextmanager
 from pathlib import Path
 
 from tqdm import tqdm
@@ -32,6 +35,19 @@ def _parse_to_cache(pdf: str, cache: Path) -> tuple[str, str | None]:
         return pdf, f"{type(exc).__name__}: {exc}"
     cache.write_text(json.dumps({"pdf": pdf, "pages": pages}, ensure_ascii=False), encoding="utf-8")
     return pdf, None
+
+
+@contextmanager
+def _workers_skip_main():
+    """Spawned workers re-import the parent's __main__ module. If the host is a script such as
+    the Streamlit app (or a test running it), each worker would re-run that script. The workers
+    only need this module, so hide __main__ from them while they start."""
+    main = sys.modules["__main__"]
+    sys.modules["__main__"] = types.ModuleType("__main__")
+    try:
+        yield
+    finally:
+        sys.modules["__main__"] = main
 
 
 def run_ingest(reparse: bool = False, limit: int | None = None, progress=None) -> dict:
@@ -54,8 +70,8 @@ def run_ingest(reparse: bool = False, limit: int | None = None, progress=None) -
     if todo:
         # spawn: safe to start from threaded hosts such as the Streamlit app
         ctx = multiprocessing.get_context("spawn")
-        with ProcessPoolExecutor(max_workers=min(cfg["ingest"]["workers"], len(todo)),
-                                 mp_context=ctx) as pool:
+        with _workers_skip_main(), ProcessPoolExecutor(
+                max_workers=min(cfg["ingest"]["workers"], len(todo)), mp_context=ctx) as pool:
             futures = [pool.submit(_parse_to_cache, pdf, parsed_cache_file(data_dir, pdf))
                        for pdf in todo]
             done = tqdm(as_completed(futures), total=len(futures), desc="Parsing PDFs",

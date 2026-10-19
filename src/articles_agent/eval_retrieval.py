@@ -5,12 +5,12 @@
 
 import yaml
 
-from .config import PROJECT_ROOT
+from .config import CODE_ROOT
 from .retriever import HybridRetriever
 
 
 def main():
-    cases = yaml.safe_load((PROJECT_ROOT / "eval" / "questions.yaml").read_text(encoding="utf-8"))
+    cases = yaml.safe_load((CODE_ROOT / "eval" / "questions.yaml").read_text(encoding="utf-8"))
     retriever = HybridRetriever()
     k = 10
     hits_at = {1: 0, 5: 0, 10: 0}

@@ -105,7 +105,8 @@ def add_source(manager: str, reference_file: str, pdf_dir: str = "",
         raise ValueError(f"{Path(ref).name} is already a library source.")
     n, sid = 1, manager
     while any(s.id == sid for s in sources):
-        n, sid = n + 1, f"{manager}{n}"
+        n += 1
+        sid = f"{manager}{n}"
     src = Source(id=sid, manager=manager, reference_file=ref, pdf_dir=pdfs, use_crossref=use_crossref)
     save_sources(sources + [src])
     return src
