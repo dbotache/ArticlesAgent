@@ -20,7 +20,7 @@ from articles_agent.results import Result
 from articles_agent.sources import load_sources
 from articles_agent.store import ZOTERO_KEY
 from articles_agent.ui_library import (index_size, render_add_papers, render_add_source,
-                                       render_job, render_models, render_new_project,
+                                       render_footer, render_job, render_models, render_new_project,
                                        render_project_settings, render_project_switcher,
                                        render_sources, start_update)
 
@@ -55,6 +55,7 @@ if not projects:
         render_models()
     st.markdown("**2 · Create your first project**")
     render_new_project("first", first=True)
+    render_footer(st)
     st.stop()
 
 # ------------------------------------------------------------------ active project
@@ -105,6 +106,8 @@ def setup_page():
 
 if index_size() == 0:
     setup_page()
+    with st.sidebar:
+        render_footer()
     st.stop()
 
 # ------------------------------------------------------------------ chat app
@@ -177,6 +180,7 @@ with st.sidebar:
             st.rerun()
     st.caption("Each question is answered independently from the library; "
                "follow-up questions don't see earlier answers.")
+    render_footer()
 
 # ------------------------------------------------------------------ rendering
 

@@ -20,6 +20,20 @@ from .projects import (Project, create_project, delete_project, embedding_pin, e
                        pin_embedding, update_project)
 
 ZOTERO_STORAGE = Path.home() / "Zotero" / "storage"
+# AGPL-3.0 §13: users of the app must be offered its source code. Running a modified version for
+# others? Set SOURCE_CODE_URL to the repository with your changes.
+DEFAULT_SOURCE_CODE_URL = "https://github.com/dbotache/ArticlesAgent"
+
+
+def source_code_url() -> str:
+    url = os.environ.get("SOURCE_CODE_URL", "").strip() or DEFAULT_SOURCE_CODE_URL
+    return url if url.startswith("https://") else DEFAULT_SOURCE_CODE_URL
+
+
+def render_footer(where=st.sidebar) -> None:
+    """License notice with the link to the source code."""
+    where.caption(f"Free software under the [AGPL-3.0](https://www.gnu.org/licenses/agpl-3.0.html) · "
+                  f"[Source code]({source_code_url()})")
 
 MANAGER_HELP = {
     "zotero": "In Zotero: **File → Export Library…** → format **BibLaTeX** (or *Better BibLaTeX*), "

@@ -275,3 +275,36 @@ def test_project_settings_reembed(built):
     at = wait_for_job(at)
     assert "`openai:text-embedding-3-large`" in " ".join(c.value for c in at.sidebar.caption)
     assert any(c.value.startswith("3 papers") for c in at.sidebar.caption)  # searchable again
+
+
+# ------------------------------------------------------------------ license
+
+
+def source_links(at: AppTest) -> list[str]:
+    return [c.value for c in at.caption if "[Source code](" in c.value] + \
+           [c.value for c in at.sidebar.caption if "[Source code](" in c.value]
+
+
+def test_source_code_link_on_every_page(app_home, built_template):
+    """AGPL-3.0 §13: the source is offered on the welcome page, the setup page and in the chat."""
+    expected = "[Source code](https://github.com/dbotache/ArticlesAgent)"
+    projects_dir = app_home / "projects"
+    shutil.move(projects_dir, app_home / "projects.bak")
+    assert any(expected in t for t in source_links(run_app()))  # welcome page
+    shutil.move(app_home / "projects.bak", projects_dir)
+    assert any(expected in t for t in source_links(run_app()))  # setup page of the empty project
+    shutil.copytree(built_template / "shared", app_home / "shared", dirs_exist_ok=True)
+    shutil.copytree(built_template / "projects" / "test", projects_dir / "test", dirs_exist_ok=True)
+    st.cache_resource.clear()
+    at = run_app()
+    assert at.chat_input and any(expected in t for t in source_links(at))  # chat
+    assert any("[AGPL-3.0](https://www.gnu.org/licenses/agpl-3.0.html)" in t for t in source_links(at))
+
+
+def test_source_code_url_is_configurable_but_https_only(monkeypatch):
+    from articles_agent.ui_library import DEFAULT_SOURCE_CODE_URL, source_code_url
+    monkeypatch.setenv("SOURCE_CODE_URL", "https://git.example.org/me/articles-agent-fork")
+    assert source_code_url() == "https://git.example.org/me/articles-agent-fork"
+    for unsafe in ("http://example.org/x", "javascript:alert(1)", ""):
+        monkeypatch.setenv("SOURCE_CODE_URL", unsafe)
+        assert source_code_url() == DEFAULT_SOURCE_CODE_URL

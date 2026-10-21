@@ -1,7 +1,9 @@
 [project]
 name = "articles-agent"
 version = "0.1.0"
-description = "RAG over a Zotero library with page-accurate citations"
+description = "RAG over your reference library with page-accurate citations"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
 requires-python = ">=3.11,<3.14"
 dependencies = [
     "pymupdf4llm>=1.27",

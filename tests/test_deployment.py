@@ -204,3 +204,11 @@ def test_no_os_commands_from_the_ui():
 def test_upload_size_is_limited():
     cfg = CODE_ROOT / ".streamlit" / "config.toml"
     assert cfg.exists() and tomllib.loads(cfg.read_text()).get("server", {}).get("maxUploadSize", 200) <= 50
+
+
+def test_license_is_declared():
+    """AGPL-3.0-or-later, as PyMuPDF requires: full text shipped, SPDX id in the package metadata."""
+    text = (CODE_ROOT / "LICENSE").read_text()
+    assert text.lstrip().startswith("GNU AFFERO GENERAL PUBLIC LICENSE") and "Remote Network Interaction" in text
+    project = tomllib.loads((CODE_ROOT / "pyproject.toml").read_text())["project"]
+    assert project["license"] == "AGPL-3.0-or-later" and project["license-files"] == ["LICENSE"]

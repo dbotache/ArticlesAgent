@@ -28,6 +28,7 @@ OpenAI-compatible server (Ollama, LM Studio, vLLM, OpenRouter, …).
 10. [Configuration reference](#10-configuration-reference)
 11. [Project layout and data files](#11-project-layout-and-data-files)
 12. [Limitations and roadmap](#12-limitations-and-roadmap)
+13. [License](#13-license)
 
 ---
 
@@ -770,3 +771,26 @@ without jumping to the page, instead of *Open in Zotero*.
 - [x] Azure OpenAI, OpenAI, Anthropic and OpenAI-compatible providers; switchable chat models; embedding model pinned per project with re-embedding
 - [ ] Batch topic reports: `topics.yaml` → one cited Markdown/DOCX report per topic
 - [ ] Extend `eval/questions.yaml` to 10–20 questions; optionally add a cross-encoder reranker
+
+---
+
+## 13. License
+
+ArticlesAgent is free software under the **GNU Affero General Public License v3.0 or later**
+(`AGPL-3.0-or-later`); see [LICENSE](LICENSE). The AGPL is required by PyMuPDF and pymupdf4llm
+(AGPL-3.0 or a commercial Artifex license), which parse the PDFs.
+
+- **Private use** (on your own machine) carries no obligations.
+- **Passing the code on** means passing it on under the AGPL, with the source.
+- **Running it for others** over a network (AGPL §13) means offering them the source code,
+  including your modifications. The app's sidebar links to it: by default to
+  <https://github.com/dbotache/ArticlesAgent>. A modified version run for others must set
+  `SOURCE_CODE_URL` (in `.env` or the environment, HTTPS) to a repository with that modified code.
+
+Your own content is not part of the project: PDFs, reference-manager exports and the generated
+`projects/` / `shared/` data are git-ignored, and the papers remain under their publishers' copyright.
+
+**Third-party licenses:** PyMuPDF, pymupdf4llm (AGPL-3.0 / commercial); LangChain, LangGraph,
+langchain-openai, langchain-anthropic, anthropic, pydantic, PyYAML, RapidFuzz (MIT); Chroma, Streamlit,
+openai, rank-bm25 (Apache-2.0); NumPy, python-dotenv (BSD); tqdm (MPL-2.0 and MIT); bibtexparser
+(LGPL-3.0 or BSD). All are compatible with the AGPL.
